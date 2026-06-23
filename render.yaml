@@ -1,0 +1,10 @@
+# Render blueprint for the PUBLIC converter-only app.
+# Deploy: push this repo to GitHub, then in Render: New + -> Blueprint -> pick the repo.
+services:
+  - type: web
+    name: freebie-converter
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /healthcheck
