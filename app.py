@@ -8,15 +8,19 @@ through this app.
 Run locally:  uvicorn app:app --port 8004
 Deploy:       uvicorn app:app --host 0.0.0.0 --port $PORT
 """
+import base64
 import html
+import os
 
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import HTMLResponse, Response
 
 try:  # works as part of the freebie package and as a flat deploy repo
     from freebie import convert_split
+    from freebie import dealupload
 except ImportError:  # pragma: no cover - deploy layout (files at repo root)
     import convert_split
+    import dealupload
 
 app = FastAPI(title="Freebie Sheet Converter")
 
@@ -29,7 +33,11 @@ _STYLE = """
  button{margin-top:18px;background:#0a7d33;color:#fff;border:0;padding:10px 18px;border-radius:6px;font-size:15px;cursor:pointer}
  code{background:#f0f0f0;padding:1px 5px;border-radius:4px}
  .err{background:#fff3f3;border:1px solid #f0caca;color:#a40000;border-radius:6px;padding:12px}
+ .ok{background:#f1faf2;border:1px solid #bfe3c6;border-radius:6px;padding:12px}
+ .warn{background:#fff8e6;border:1px solid #f0e0a0;color:#7a5b00;border-radius:6px;padding:12px;margin:8px 0}
+ pre{background:#f6f6f6;border:1px solid #e3e3e3;border-radius:6px;padding:14px;white-space:pre-wrap;font-size:13px}
  .muted{color:#666;font-size:13px}
+ a{color:#0a58ca}
 </style>
 """
 
@@ -62,9 +70,102 @@ def _form(message=""):
     """
 
 
+def _upload_form(message=""):
+    return f"""
+    <h1>Upload converted CSV &rarr; create deals</h1>
+    <div class="warn"><b>This creates real FREEBIE_DEALS in ControlGrid.</b> Preview first; nothing
+    is created until you confirm.</div>
+    {message}
+    <form action="upload-preview" method="post" enctype="multipart/form-data">
+      <label>Converted CSV <span class="muted">(the file downloaded from the converter)</span></label>
+      <input type="file" name="file" accept=".csv" required>
+      <p class="muted">By default the server's ControlGrid login is used. If it has expired,
+      paste your own cookies (from your logged-in browser at portal.controlgrid.in) to run it as yourself.</p>
+      <label>SESSION cookie <span class="muted">(optional)</span></label>
+      <input type="text" name="session_cookie" placeholder="leave blank to use the server login">
+      <label>XSRF-TOKEN cookie <span class="muted">(optional)</span></label>
+      <input type="text" name="xsrf_token" placeholder="leave blank to use the server login">
+      <button type="submit">Preview deals</button>
+    </form>
+    <p style="margin-top:14px"><a href=".">&larr; Back to converter</a></p>
+    """
+
+
+def _resolve_auth(form_session, form_xsrf):
+    """Form-provided cookies win; otherwise fall back to the server env login."""
+    session = (form_session or "").strip() or os.environ.get("FREEBIE_SESSION", "")
+    xsrf = (form_xsrf or "").strip() or os.environ.get("FREEBIE_XSRF", "")
+    return session, xsrf
+
+
 @app.get("/", response_class=HTMLResponse)
 def index():
-    return _page(_form())
+    link = '<p><a href="upload">&rarr; Upload a converted CSV to create the deals in ControlGrid</a></p>'
+    return _page(_form() + link)
+
+
+@app.get("/upload", response_class=HTMLResponse)
+def upload_form():
+    return _page(_upload_form())
+
+
+@app.post("/upload-preview", response_class=HTMLResponse)
+async def upload_preview(file: UploadFile = File(...),
+                         session_cookie: str = Form(""), xsrf_token: str = Form("")):
+    data = await file.read()
+    try:
+        targets = dealupload.parse_split_csv(data)
+    except dealupload.ValidationError as e:
+        items = "".join(f"<li>{html.escape(m)}</li>" for m in e.messages)
+        return _page(_upload_form(f'<div class="err"><b>Validation failed:</b><ul>{items}</ul></div>'))
+    except Exception as ex:  # noqa: BLE001
+        return _page(_upload_form(f'<div class="err">Could not read CSV: {html.escape(str(ex))}</div>'))
+
+    session, xsrf = _resolve_auth(session_cookie, xsrf_token)
+    if not session or not xsrf:
+        return _page(_upload_form('<div class="err">No ControlGrid login available. '
+                                  'Paste your SESSION and XSRF-TOKEN cookies above.</div>'))
+
+    using = "your pasted cookies" if session_cookie.strip() else "the server login"
+    csv_b64 = base64.b64encode(data).decode()
+    body = f"""
+    <h1>Preview</h1>
+    <p class="muted">Auth: {using}. Nothing has been created yet.</p>
+    <pre>{html.escape(dealupload.preview_text(targets))}</pre>
+    <form action="upload-execute" method="post">
+      <input type="hidden" name="csv_b64" value="{csv_b64}">
+      <input type="hidden" name="session_cookie" value="{html.escape(session_cookie)}">
+      <input type="hidden" name="xsrf_token" value="{html.escape(xsrf_token)}">
+      <button type="submit">Confirm &amp; create {len(targets)} rule(s)</button>
+    </form>
+    <p style="margin-top:14px"><a href="upload">&larr; Start over</a></p>
+    """
+    return _page(body)
+
+
+@app.post("/upload-execute", response_class=HTMLResponse)
+def upload_execute(csv_b64: str = Form(...),
+                   session_cookie: str = Form(""), xsrf_token: str = Form("")):
+    try:
+        data = base64.b64decode(csv_b64)
+        targets = dealupload.parse_split_csv(data)
+    except Exception as ex:  # noqa: BLE001
+        return _page(_upload_form(f'<div class="err">{html.escape(str(ex))}</div>'))
+
+    session, xsrf = _resolve_auth(session_cookie, xsrf_token)
+    if not session or not xsrf:
+        return _page(_upload_form('<div class="err">No ControlGrid login available.</div>'))
+
+    result = dealupload.create_deals(targets, session, xsrf)
+    failed = "".join(f"<li>{html.escape(n)}: {html.escape(e)}</li>" for n, e in result["failed"])
+    failed_block = f'<div class="err"><b>Failures:</b><ul>{failed}</ul></div>' if failed else ""
+    body = f"""
+    <h1>Done</h1>
+    <div class="ok">Created <b>{len(result['created'])}</b>, failed <b>{len(result['failed'])}</b>.</div>
+    {failed_block}
+    <p style="margin-top:14px"><a href=".">&larr; Convert another</a> &middot; <a href="upload">Upload another</a></p>
+    """
+    return _page(body)
 
 
 @app.get("/healthcheck")
