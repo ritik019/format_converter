@@ -55,6 +55,12 @@ CART_DESCRIPTION_DEFAULT = "Add items worth Rs.$$$ more to unlock"
 
 FULL_QTY_THRESHOLD = 5  # qty <= this -> FULL (no split)
 
+# Rules are ACTIVE by default; a row is only inactive if the status column
+# explicitly says one of these.
+_INACTIVE_STATUSES = {
+    "inactive", "paused", "off", "false", "no", "0", "draft", "disabled", "expired",
+}
+
 # When the warehouse cell says "all" / "all ch", apply every channel as
 # PARTIAL with this split_number.
 ALL_CHANNELS = [
@@ -201,8 +207,9 @@ def convert_rows(rows, year=None):
             warnings.append(f"Line {line} ({name or fcn or '?'}): no warehouse ids found - row skipped")
             continue
 
-        status = cell(row, status_idx).upper()
-        activation = "TRUE" if status == "LIVE" else "FALSE"
+        # Active by default; only FALSE when the status column explicitly says so.
+        status = cell(row, status_idx).strip().lower()
+        activation = "FALSE" if status in _INACTIVE_STATUSES else "TRUE"
         start_time, end_time = _parse_start_end(cell(row, date_idx), year)
         if not start_time:
             warnings.append(f"Line {line} ({name}): could not parse date {cell(row, date_idx)!r} - times left blank")

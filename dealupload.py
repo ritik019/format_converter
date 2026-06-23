@@ -55,6 +55,14 @@ def _bool(value):
     return str(value).strip().lower() in ("true", "yes", "1")
 
 
+def _is_active(value):
+    """Active by default; only inactive when explicitly false."""
+    s = str(value).strip().lower()
+    if s == "":
+        return True
+    return s not in ("false", "no", "0", "inactive", "paused", "off", "draft")
+
+
 def _number(value):
     return float(str(value).strip().replace(",", ""))
 
@@ -149,7 +157,7 @@ def parse_split_csv(data):
         targets.append(TargetRule(
             rule_name=rule.get("rule_name", ""),
             rule_description=rule.get("rule_description") or rule.get("rule_name", ""),
-            is_active=_bool(rule.get("activation", "")),
+            is_active=_is_active(rule.get("activation", "")),
             start_ms=start_ms,
             end_ms=end_ms,
             replenishment_type=rule.get("replenishment_type") or "DAILY",
