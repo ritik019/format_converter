@@ -13,7 +13,7 @@ import html
 import os
 
 from fastapi import FastAPI, UploadFile, File, Form
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, Response, RedirectResponse
 
 try:  # works as part of the freebie package and as a flat deploy repo
     from freebie import convert_split
@@ -180,6 +180,18 @@ def upload_execute(csv_b64: str = Form(...),
     <p style="margin-top:14px"><a href=".">&larr; Convert another</a> &middot; <a href="upload">Upload another</a></p>
     """
     return _page(body)
+
+
+@app.get("/convert")
+def convert_get():
+    # The converter form POSTs here; a browser GET just bounces to the form.
+    return RedirectResponse(url="/")
+
+
+@app.get("/upload-preview")
+@app.get("/upload-execute")
+def upload_get():
+    return RedirectResponse(url="/upload")
 
 
 @app.get("/healthcheck")
