@@ -90,6 +90,15 @@ _DATE_FORMATS = [
 ]
 
 
+def _today_start_end():
+    """Fallback when a row has no usable date: today 00:00 -> tomorrow 00:00 IST."""
+    now = datetime.now(IST)
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1)
+    fmt = "%Y-%m-%d %H:%M:%S"
+    return start.strftime(fmt), end.strftime(fmt)
+
+
 def _parse_start_end(cell, year):
     """('Sun, 21 Jun', 2026) -> ('2026-06-21 00:00:00', '2026-06-22 00:00:00')."""
     s = str(cell).strip()
@@ -191,6 +200,7 @@ def convert_rows(rows, year=None):
 
     out = [list(TARGET_HEADER)]
     warnings = []
+    last_date = ""  # carry the date down (handles merged cells / deleted rows)
 
     for r in range(header_idx + 1, len(rows)):
         row = rows[r]
@@ -210,9 +220,13 @@ def convert_rows(rows, year=None):
         # Active by default; only FALSE when the status column explicitly says so.
         status = cell(row, status_idx).strip().lower()
         activation = "FALSE" if status in _INACTIVE_STATUSES else "TRUE"
-        start_time, end_time = _parse_start_end(cell(row, date_idx), year)
+        raw_date = cell(row, date_idx)
+        if raw_date:
+            last_date = raw_date  # remember most recent date for blank rows below
+        start_time, end_time = _parse_start_end(last_date, year)
         if not start_time:
-            warnings.append(f"Line {line} ({name}): could not parse date {cell(row, date_idx)!r} - times left blank")
+            start_time, end_time = _today_start_end()
+            warnings.append(f"Line {line} ({name}): no usable date {raw_date!r} - defaulted to today")
         threshold, mov_err = _cart_threshold(cell(row, mov_idx))
         if mov_err:
             warnings.append(f"Line {line} ({name}): {mov_err}")

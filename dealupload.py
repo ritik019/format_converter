@@ -15,14 +15,14 @@ from datetime import datetime, timezone, timedelta
 
 try:  # works inside the freebie package and as a flat deploy repo
     from freebie.models import WarehouseConfig, TargetRule, ValidationError
-    from freebie.payloads import build_create_payload
     from freebie.controlgrid import ControlGrid
     from freebie.auth import make_post_fn
+    from freebie.planner import build_plan, render_preview, execute_plan
 except ImportError:  # pragma: no cover - deploy layout (files at repo root)
     from models import WarehouseConfig, TargetRule, ValidationError
-    from payloads import build_create_payload
     from controlgrid import ControlGrid
     from auth import make_post_fn
+    from planner import build_plan, render_preview, execute_plan
 
 IST = timezone(timedelta(hours=5, minutes=30))
 DEFAULT_EMAIL = os.environ.get("FREEBIE_EMAIL", "madhavsingal@firstclub.co.in")
@@ -49,6 +49,14 @@ def _epoch_ms(value):
             continue
         return int(dt.replace(tzinfo=IST).timestamp() * 1000)
     raise ValueError(f"unrecognized date-time {value!r}")
+
+
+def _today_ms():
+    """Today 00:00 -> tomorrow 00:00 IST, in epoch millis."""
+    now = datetime.now(IST)
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1)
+    return int(start.timestamp() * 1000), int(end.timestamp() * 1000)
 
 
 def _bool(value):
@@ -139,14 +147,19 @@ def parse_split_csv(data):
             seen.add(wid)
             warehouses.append(WarehouseConfig(wid, "FULL" if is_full else "PARTIAL", cap))
 
-        try:
-            start_ms = _epoch_ms(rule.get("start_time", ""))
-            end_ms = _epoch_ms(rule.get("end-time", ""))
-            if end_ms <= start_ms:
-                errors.append(f"Line {line}: end-time must be after start_time")
-        except ValueError as e:
-            errors.append(f"Line {line}: {e}")
-            start_ms = end_ms = 0
+        st_raw = rule.get("start_time", "").strip()
+        et_raw = rule.get("end-time", "").strip()
+        if not st_raw or not et_raw:
+            start_ms, end_ms = _today_ms()  # blank dates -> today (don't fail)
+        else:
+            try:
+                start_ms = _epoch_ms(st_raw)
+                end_ms = _epoch_ms(et_raw)
+                if end_ms <= start_ms:
+                    errors.append(f"Line {line}: end-time must be after start_time")
+            except ValueError as e:
+                errors.append(f"Line {line}: {e}")
+                start_ms = end_ms = 0
 
         try:
             threshold = _number(rule.get("cart_value_threshold", ""))
@@ -185,15 +198,22 @@ def preview_text(targets):
     return "\n".join(lines)
 
 
-def create_deals(targets, session_cookie, xsrf_token, email=None):
-    """Create each target via ControlGrid. Returns {'created': [...], 'failed': [...]}."""
+def build_upload_plan(targets, session_cookie, xsrf_token, email=None):
+    """Fetch existing rules and build a plan. Overlapping FSN x warehouse are
+    removed from existing rules (edits) so the uploaded sheet wins, then the new
+    rules are created. Returns (plan, client)."""
     email = email or DEFAULT_EMAIL
     client = ControlGrid(make_post_fn(session_cookie, xsrf_token))
-    result = {"created": [], "failed": []}
-    for t in targets:
-        try:
-            client.create_rule(build_create_payload(t, email))
-            result["created"].append(t.rule_name)
-        except Exception as ex:  # noqa: BLE001 - report and continue
-            result["failed"].append((t.rule_name, str(ex)))
-    return result
+    existing = client.fetch_all()
+    plan = build_plan(targets, existing, email)
+    return plan, client
+
+
+def plan_preview(plan):
+    return render_preview(plan)
+
+
+def execute_upload(targets, session_cookie, xsrf_token, email=None):
+    """Build and execute the plan. Returns {'edited','created','failed'}."""
+    plan, client = build_upload_plan(targets, session_cookie, xsrf_token, email)
+    return execute_plan(plan, client)

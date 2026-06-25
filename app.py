@@ -127,16 +127,23 @@ async def upload_preview(file: UploadFile = File(...),
                                   'Paste your SESSION and XSRF-TOKEN cookies above.</div>'))
 
     using = "your pasted cookies" if session_cookie.strip() else "the server login"
+    try:
+        plan, _ = dealupload.build_upload_plan(targets, session, xsrf)
+    except Exception as ex:  # noqa: BLE001 - cookies likely expired
+        return _page(_upload_form(f'<div class="err">Could not fetch existing rules '
+                                  f'(login may have expired): {html.escape(str(ex))}</div>'))
+
     csv_b64 = base64.b64encode(data).decode()
     body = f"""
     <h1>Preview</h1>
-    <p class="muted">Auth: {using}. Nothing has been created yet.</p>
-    <pre>{html.escape(dealupload.preview_text(targets))}</pre>
+    <p class="muted">Auth: {using}. Nothing has been written yet. Existing FSN&times;warehouse
+    overlaps are removed from old rules (edits) so this sheet wins.</p>
+    <pre>{html.escape(dealupload.plan_preview(plan))}</pre>
     <form action="upload-execute" method="post">
       <input type="hidden" name="csv_b64" value="{csv_b64}">
       <input type="hidden" name="session_cookie" value="{html.escape(session_cookie)}">
       <input type="hidden" name="xsrf_token" value="{html.escape(xsrf_token)}">
-      <button type="submit">Confirm &amp; create {len(targets)} rule(s)</button>
+      <button type="submit">Confirm &amp; apply ({len(plan.edits)} edit(s), {len(plan.creates)} create(s))</button>
     </form>
     <p style="margin-top:14px"><a href="upload">&larr; Start over</a></p>
     """
@@ -156,12 +163,19 @@ def upload_execute(csv_b64: str = Form(...),
     if not session or not xsrf:
         return _page(_upload_form('<div class="err">No ControlGrid login available.</div>'))
 
-    result = dealupload.create_deals(targets, session, xsrf)
-    failed = "".join(f"<li>{html.escape(n)}: {html.escape(e)}</li>" for n, e in result["failed"])
+    try:
+        result = dealupload.execute_upload(targets, session, xsrf)
+    except Exception as ex:  # noqa: BLE001 - cookies likely expired
+        return _page(_upload_form(f'<div class="err">Could not apply (login may have expired): '
+                                  f'{html.escape(str(ex))}</div>'))
+
+    failed = "".join(f"<li>{html.escape(str(k))} {html.escape(str(i))}: {html.escape(e)}</li>"
+                     for k, i, e in result["failed"])
     failed_block = f'<div class="err"><b>Failures:</b><ul>{failed}</ul></div>' if failed else ""
     body = f"""
     <h1>Done</h1>
-    <div class="ok">Created <b>{len(result['created'])}</b>, failed <b>{len(result['failed'])}</b>.</div>
+    <div class="ok">Edited <b>{len(result['edited'])}</b>, created <b>{len(result['created'])}</b>,
+    failed <b>{len(result['failed'])}</b>.</div>
     {failed_block}
     <p style="margin-top:14px"><a href=".">&larr; Convert another</a> &middot; <a href="upload">Upload another</a></p>
     """
