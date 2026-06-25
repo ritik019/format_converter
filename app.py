@@ -29,7 +29,7 @@ _STYLE = """
  body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:920px;margin:32px auto;padding:0 16px;color:#1a1a1a}
  h1{font-size:22px}
  label{display:block;font-weight:600;margin:16px 0 6px}
- input[type=text],input[type=file]{width:100%;padding:8px;border:1px solid #ccc;border-radius:6px;font:inherit}
+ input[type=text],input[type=file],select{width:100%;padding:8px;border:1px solid #ccc;border-radius:6px;font:inherit}
  button{margin-top:18px;background:#0a7d33;color:#fff;border:0;padding:10px 18px;border-radius:6px;font-size:15px;cursor:pointer}
  code{background:#f0f0f0;padding:1px 5px;border-radius:4px}
  .err{background:#fff3f3;border:1px solid #f0caca;color:#a40000;border-radius:6px;padding:12px}
@@ -65,6 +65,12 @@ def _form(message=""):
       <input type="text" name="sheet_url" placeholder="https://docs.google.com/spreadsheets/d/.../edit?gid=...">
       <label>&hellip; or upload a CSV instead</label>
       <input type="file" name="file" accept=".csv">
+      <label>When the sheet says <code>all</code>, apply to:</label>
+      <select name="all_region">
+        <option value="all">All channels (BLR + HYD)</option>
+        <option value="blr">BLR only</option>
+        <option value="hyd">HYD only</option>
+      </select>
       <button type="submit">Convert &amp; download</button>
     </form>
     """
@@ -200,14 +206,15 @@ def healthcheck():
 
 
 @app.post("/convert")
-async def convert(file: UploadFile = File(None), sheet_url: str = Form("")):
+async def convert(file: UploadFile = File(None), sheet_url: str = Form(""),
+                  all_region: str = Form("all")):
     sheet_url = (sheet_url or "").strip()
     try:
         if sheet_url:
-            out_bytes, warnings = convert_split.convert_from_sheet(sheet_url)
+            out_bytes, warnings = convert_split.convert_from_sheet(sheet_url, all_region=all_region)
             name = "sheet"
         elif file is not None:
-            out_bytes, warnings = convert_split.convert_csv_bytes(await file.read())
+            out_bytes, warnings = convert_split.convert_csv_bytes(await file.read(), all_region=all_region)
             name = (file.filename or "sheet").rsplit(".", 1)[0]
         else:
             return _page(_form('<div class="err">Provide a Google Sheet link or upload a CSV.</div>'))

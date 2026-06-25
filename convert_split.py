@@ -73,6 +73,21 @@ ALL_CHANNELS = [
 ]
 ALL_SPLIT = 20  # split_number used for every channel when "all" is given
 
+# Region subsets of "all", keyed by warehouse-id prefix.
+BLR_CHANNELS = [c for c in ALL_CHANNELS if c.startswith("FCHBLR")]
+HYD_CHANNELS = [c for c in ALL_CHANNELS if c.startswith("FCHHYD")]
+
+
+def channels_for(region):
+    """region in {'all','blr','hyd'} -> the channel list that 'all' expands to."""
+    r = (region or "all").strip().lower()
+    if r == "blr":
+        return BLR_CHANNELS
+    if r == "hyd":
+        return HYD_CHANNELS
+    return ALL_CHANNELS
+
+
 # Matches a line that is "all", "all ch", "all channels", etc.
 _ALL_RE = re.compile(r"^all(\s+ch.*)?$", re.I)
 
@@ -128,14 +143,15 @@ def _find_header(rows):
     raise ValueError("Header row with 'mov' and 'warehouse' not found")
 
 
-def _warehouse_qty(cell):
+def _warehouse_qty(cell, all_channels=ALL_CHANNELS):
     """Parse the multi-line warehouse cell -> ([(wid, qty_or_None)], notes).
 
-    If any line says "all" / "all ch", expand to every channel as PARTIAL
-    (split_number = ALL_SPLIT), ignoring any individually-listed warehouses.
+    If any line says "all" / "all ch", expand to every channel in all_channels
+    as PARTIAL (split_number = ALL_SPLIT), ignoring individually-listed warehouses.
     """
     if any(_ALL_RE.match(line.strip()) for line in str(cell).splitlines()):
-        return [(c, ALL_SPLIT) for c in ALL_CHANNELS], ["'all' -> all channels @ split 20"]
+        return ([(c, ALL_SPLIT) for c in all_channels],
+                [f"'all' -> {len(all_channels)} channels @ split {ALL_SPLIT}"])
 
     pairs, seen, notes = [], set(), []
     for line in str(cell).splitlines():
@@ -178,10 +194,15 @@ def _cart_threshold(mov):
     return (str(int(n)) if n == int(n) else str(n)), None
 
 
-def convert_rows(rows, year=None):
-    """Convert source rows (list-of-lists) -> (target_rows, warnings)."""
+def convert_rows(rows, year=None, all_region="all"):
+    """Convert source rows (list-of-lists) -> (target_rows, warnings).
+
+    all_region ('all'|'blr'|'hyd') decides which channels a literal "all" in the
+    warehouse cell expands to.
+    """
     if year is None:
         year = datetime.now(IST).year
+    all_channels = channels_for(all_region)
 
     header_idx, labels = _find_header(rows)
     try:
@@ -210,7 +231,7 @@ def convert_rows(rows, year=None):
         if not any(cell(row, i) for i in (name_idx, fcn_idx, wh_idx, mov_idx)):
             continue
 
-        pairs, notes = _warehouse_qty(row[wh_idx] if wh_idx < len(row) else "")
+        pairs, notes = _warehouse_qty(row[wh_idx] if wh_idx < len(row) else "", all_channels)
         for n in notes:
             warnings.append(f"Line {line} ({name}): {n}")
         if not pairs:
@@ -246,11 +267,11 @@ def convert_rows(rows, year=None):
     return out, warnings
 
 
-def convert_csv_bytes(data, year=None):
+def convert_csv_bytes(data, year=None, all_region="all"):
     """CSV bytes -> (converted CSV bytes, warnings)."""
     text = data.decode("utf-8-sig")
     rows = list(csv.reader(io.StringIO(text)))
-    out_rows, warnings = convert_rows(rows, year=year)
+    out_rows, warnings = convert_rows(rows, year=year, all_region=all_region)
     buf = io.StringIO()
     csv.writer(buf).writerows(out_rows)
     return buf.getvalue().encode("utf-8"), warnings
@@ -280,9 +301,9 @@ def fetch_sheet_csv(url_or_id):
     return data
 
 
-def convert_from_sheet(url_or_id, year=None):
+def convert_from_sheet(url_or_id, year=None, all_region="all"):
     """Fetch a Google Sheet by URL/id and convert it -> (CSV bytes, warnings)."""
-    return convert_csv_bytes(fetch_sheet_csv(url_or_id), year=year)
+    return convert_csv_bytes(fetch_sheet_csv(url_or_id), year=year, all_region=all_region)
 
 
 def main(argv=None):
