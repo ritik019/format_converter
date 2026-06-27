@@ -3,3 +3,6 @@ __pycache__/
 .env
 service_account.json
 .DS_Store
+.venv/
+venv/
+.claude/

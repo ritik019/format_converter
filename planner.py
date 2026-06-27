@@ -41,6 +41,15 @@ def build_plan(targets, existing_rules, email, excluded_cohort_ids=None):
     return Plan(edits=edits, creates=creates, excluded_cohort_ids=list(excluded_cohort_ids or []))
 
 
+def filter_plan(plan, edit_ids, create_names):
+    """Narrow a freshly-built plan to only the items that previously failed, so a
+    re-run (after deleting conflicting rules) doesn't re-touch items that already
+    succeeded. edit_ids is a set of rule-id strings; create_names a set of names."""
+    edits = [e for e in plan.edits if str(e["ruleId"]) in edit_ids]
+    creates = [c for c in plan.creates if c["rule"]["name"] in create_names]
+    return Plan(edits=edits, creates=creates, excluded_cohort_ids=plan.excluded_cohort_ids)
+
+
 def render_preview(plan):
     lines = [f"PLAN: {len(plan.edits)} edit(s), {len(plan.creates)} create(s)"]
     if plan.excluded_cohort_ids:
