@@ -235,6 +235,8 @@ def _deals_form(message=""):
         <input type="file" name="file" accept=".csv" required>
         <label>Excluded cohort IDs <span class="muted">(comma / space / newline separated — optional)</span></label>
         <textarea name="cohort_ids" placeholder="cohort_123, cohort_456"></textarea>
+        <label>Created / edited by <span class="muted">(your name or email — stamped on every rule you create, edit or delete; defaults to the server account if blank)</span></label>
+        <input type="text" name="actor" placeholder="e.g. sakshyat.pradhan@firstclub.co.in">
         <details class="adv">
           <summary>Advanced &mdash; run with your own ControlGrid login</summary>
           <p class="muted" style="margin-top:8px">The server's environment login is used by default.
@@ -415,7 +417,7 @@ _CONFLICT_JS = """
 """
 
 
-def _conflict_section(conflicts, csv_b64, cohort_ids, retry, session_cookie="", xsrf_token=""):
+def _conflict_section(conflicts, csv_b64, cohort_ids, retry, session_cookie="", xsrf_token="", actor=""):
     """Render the checkbox table of conflicting rules + the re-run form. The
     failed items to retry travel along (base64 JSON) so /resolve re-runs only those.
     Any pasted cookies ride along too, so the re-run uses the same login. Each row
@@ -457,6 +459,7 @@ def _conflict_section(conflicts, csv_b64, cohort_ids, retry, session_cookie="", 
       <input type="hidden" name="csv_b64" value="{csv_b64}">
       <input type="hidden" name="cohort_ids" value="{html.escape(cohort_ids)}">
       <input type="hidden" name="retry_b64" value="{retry_b64}">
+      <input type="hidden" name="actor" value="{html.escape(actor)}">
       <input type="hidden" name="session_cookie" value="{html.escape(session_cookie)}">
       <input type="hidden" name="xsrf_token" value="{html.escape(xsrf_token)}">
       <div class="toolbar">
@@ -509,6 +512,7 @@ def deals_form():
 
 @app.post("/preview", response_class=HTMLResponse)
 async def preview(file: UploadFile = File(...), cohort_ids: str = Form(""),
+                  actor: str = Form(""),
                   session_cookie: str = Form(""), xsrf_token: str = Form("")):
     data = await file.read()
     cohorts = parse_cohort_ids(cohort_ids)
@@ -534,7 +538,8 @@ async def preview(file: UploadFile = File(...), cohort_ids: str = Form(""),
                                  f'(cookies may have expired): {html.escape(str(ex))}</div>'),
                      active="deals")
 
-    plan = build_plan(targets, existing, cfg.email, cohorts)
+    email = (actor or "").strip() or cfg.email
+    plan = build_plan(targets, existing, email, cohorts)
     csv_b64 = base64.b64encode(data).decode()
     body = f"""
     <div class="card">
@@ -550,6 +555,7 @@ async def preview(file: UploadFile = File(...), cohort_ids: str = Form(""),
       <form action="execute" method="post">
         <input type="hidden" name="csv_b64" value="{csv_b64}">
         <input type="hidden" name="cohort_ids" value="{html.escape(cohort_ids)}">
+        <input type="hidden" name="actor" value="{html.escape(actor)}">
         <input type="hidden" name="session_cookie" value="{html.escape(session_cookie)}">
         <input type="hidden" name="xsrf_token" value="{html.escape(xsrf_token)}">
         <button class="btn go" type="submit">Confirm &amp; execute ({len(plan.edits)} edits, {len(plan.creates)} creates)</button>
@@ -561,7 +567,7 @@ async def preview(file: UploadFile = File(...), cohort_ids: str = Form(""),
 
 
 @app.post("/execute", response_class=HTMLResponse)
-def execute(csv_b64: str = Form(...), cohort_ids: str = Form(""),
+def execute(csv_b64: str = Form(...), cohort_ids: str = Form(""), actor: str = Form(""),
             session_cookie: str = Form(""), xsrf_token: str = Form("")):
     data = base64.b64decode(csv_b64)
     cohorts = parse_cohort_ids(cohort_ids)
@@ -586,7 +592,8 @@ def execute(csv_b64: str = Form(...), cohort_ids: str = Form(""),
                                  f'(cookies may have expired): {html.escape(str(ex))}</div>'),
                      active="deals")
 
-    plan = build_plan(targets, existing, cfg.email, cohorts)
+    email = (actor or "").strip() or cfg.email
+    plan = build_plan(targets, existing, email, cohorts)
     try:
         result = execute_plan(plan, client)
     except Exception as ex:  # noqa: BLE001
@@ -599,7 +606,7 @@ def execute(csv_b64: str = Form(...), cohort_ids: str = Form(""),
     except Exception:  # noqa: BLE001 - conflict lookup is best-effort
         conflicts = []
     conflict_section = _conflict_section(conflicts, csv_b64, cohort_ids, _retry_set(result),
-                                         session_cookie, xsrf_token)
+                                         session_cookie, xsrf_token, actor)
     failed_cls = " bad" if result["failed"] else ""
     body = f"""
     <div class="card">
@@ -618,7 +625,7 @@ def execute(csv_b64: str = Form(...), cohort_ids: str = Form(""),
 
 
 @app.post("/resolve", response_class=HTMLResponse)
-def resolve(csv_b64: str = Form(...), cohort_ids: str = Form(""),
+def resolve(csv_b64: str = Form(...), cohort_ids: str = Form(""), actor: str = Form(""),
             retry_b64: str = Form(...), delete_ids: List[str] = Form(default=[]),
             session_cookie: str = Form(""), xsrf_token: str = Form("")):
     """Delete the user-selected conflicting rules, then re-run only the items that
@@ -643,10 +650,11 @@ def resolve(csv_b64: str = Form(...), cohort_ids: str = Form(""),
     if cfg is None:
         return _page(_deals_form(client), active="deals")
 
+    email = (actor or "").strip() or cfg.email
     deleted, delete_failed = [], []
     for rid in delete_ids:
         try:
-            client.delete_rule(rid, cfg.email)
+            client.delete_rule(rid, email)
             deleted.append(rid)
         except Exception as ex:  # noqa: BLE001 - report and continue
             delete_failed.append((rid, str(ex)))
@@ -658,7 +666,7 @@ def resolve(csv_b64: str = Form(...), cohort_ids: str = Form(""),
                                  f'(cookies may have expired): {html.escape(str(ex))}</div>'),
                      active="deals")
 
-    plan = build_plan(targets, existing, cfg.email, cohorts)
+    plan = build_plan(targets, existing, email, cohorts)
     plan = filter_plan(plan, set(retry.get("edits", [])), set(retry.get("creates", [])))
     try:
         result = execute_plan(plan, client)
@@ -672,7 +680,7 @@ def resolve(csv_b64: str = Form(...), cohort_ids: str = Form(""),
     except Exception:  # noqa: BLE001 - conflict lookup is best-effort
         conflicts = []
     conflict_section = _conflict_section(conflicts, csv_b64, cohort_ids, _retry_set(result),
-                                         session_cookie, xsrf_token)
+                                         session_cookie, xsrf_token, actor)
 
     del_block = ""
     if deleted:
