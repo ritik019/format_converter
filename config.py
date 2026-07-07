@@ -13,11 +13,11 @@ SHEET_TAB = "FREEBIE_DEALS"
 
 class Config:
     def __init__(self):
-        self.session = os.environ.get("FREEBIE_SESSION", "")
-        self.xsrf = os.environ.get("FREEBIE_XSRF", "")
+        self.auth_token = os.environ.get("FREEBIE_AUTH_TOKEN", "")
         self.email = os.environ.get("FREEBIE_EMAIL", DEFAULT_EMAIL)
 
     def require_auth(self):
-        if not self.session or not self.xsrf:
-            raise SystemExit("Set FREEBIE_SESSION and FREEBIE_XSRF environment variables "
-                             "(from your logged-in browser cookies).")
+        if not self.auth_token:
+            raise SystemExit("Set the FREEBIE_AUTH_TOKEN environment variable "
+                             "(the Cognito ID token ControlGrid's UI sends as "
+                             "Authorization: Bearer).")

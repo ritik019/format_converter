@@ -240,12 +240,11 @@ def _deals_form(message=""):
         <details class="adv">
           <summary>Advanced &mdash; run with your own ControlGrid login</summary>
           <p class="muted" style="margin-top:8px">The server's environment login is used by default.
-          If it has expired, paste your own cookies from your logged-in browser at
-          portal.controlgrid.in to run it as yourself.</p>
-          <label>SESSION cookie <span class="muted">(optional)</span></label>
-          <input type="text" name="session_cookie" placeholder="leave blank to use the server login">
-          <label>XSRF-TOKEN cookie <span class="muted">(optional)</span></label>
-          <input type="text" name="xsrf_token" placeholder="leave blank to use the server login">
+          If it has expired, paste your own Cognito ID token &mdash; from the Network tab at
+          portal.controlgrid.in, the <code>Authorization: Bearer …</code> header on any
+          rules-management request &mdash; to run it as yourself.</p>
+          <label>Login token <span class="muted">(optional)</span></label>
+          <textarea name="auth_token" placeholder="leave blank to use the server login"></textarea>
         </details>
         <button class="btn go" type="submit">Preview plan</button>
       </form>
@@ -417,7 +416,7 @@ _CONFLICT_JS = """
 """
 
 
-def _conflict_section(conflicts, csv_b64, cohort_ids, retry, session_cookie="", xsrf_token="", actor=""):
+def _conflict_section(conflicts, csv_b64, cohort_ids, retry, auth_token="", actor=""):
     """Render the checkbox table of conflicting rules + the re-run form. The
     failed items to retry travel along (base64 JSON) so /resolve re-runs only those.
     Any pasted cookies ride along too, so the re-run uses the same login. Each row
@@ -460,8 +459,7 @@ def _conflict_section(conflicts, csv_b64, cohort_ids, retry, session_cookie="", 
       <input type="hidden" name="cohort_ids" value="{html.escape(cohort_ids)}">
       <input type="hidden" name="retry_b64" value="{retry_b64}">
       <input type="hidden" name="actor" value="{html.escape(actor)}">
-      <input type="hidden" name="session_cookie" value="{html.escape(session_cookie)}">
-      <input type="hidden" name="xsrf_token" value="{html.escape(xsrf_token)}">
+      <input type="hidden" name="auth_token" value="{html.escape(auth_token)}">
       <div class="toolbar">
         <input type="text" id="cf-search" placeholder="Filter by name / id / FSN / warehouse / cohort / editor…">
         <select id="cf-type">
@@ -486,23 +484,22 @@ def _conflict_section(conflicts, csv_b64, cohort_ids, retry, session_cookie="", 
     return table + _CONFLICT_JS
 
 
-def _resolve_auth(form_session, form_xsrf):
-    """Form-provided cookies win; otherwise fall back to the server env login."""
+def _resolve_auth(form_token):
+    """Form-provided token wins; otherwise fall back to the server env login."""
     cfg = Config()
-    session = (form_session or "").strip() or cfg.session
-    xsrf = (form_xsrf or "").strip() or cfg.xsrf
-    return cfg, session, xsrf
+    token = (form_token or "").strip() or cfg.auth_token
+    return cfg, token
 
 
-def _get_client(form_session="", form_xsrf=""):
-    """Returns (cfg, client) on success, or (None, error_html). Pasted cookies
-    take precedence over the server's FREEBIE_SESSION / FREEBIE_XSRF env login."""
-    cfg, session, xsrf = _resolve_auth(form_session, form_xsrf)
-    if not session or not xsrf:
+def _get_client(form_token=""):
+    """Returns (cfg, client) on success, or (None, error_html). A pasted token
+    takes precedence over the server's FREEBIE_AUTH_TOKEN env login."""
+    cfg, token = _resolve_auth(form_token)
+    if not token:
         return None, ('<div class="err">No ControlGrid login available. Set '
-                      'FREEBIE_SESSION / FREEBIE_XSRF in the service environment, or paste '
-                      'your SESSION and XSRF-TOKEN cookies under <b>Advanced</b>.</div>')
-    return cfg, ControlGrid(make_post_fn(session, xsrf))
+                      'FREEBIE_AUTH_TOKEN in the service environment, or paste '
+                      'your login token under <b>Advanced</b>.</div>')
+    return cfg, ControlGrid(make_post_fn(token))
 
 
 @app.get("/deals", response_class=HTMLResponse)
@@ -513,7 +510,7 @@ def deals_form():
 @app.post("/preview", response_class=HTMLResponse)
 async def preview(file: UploadFile = File(...), cohort_ids: str = Form(""),
                   actor: str = Form(""),
-                  session_cookie: str = Form(""), xsrf_token: str = Form("")):
+                  auth_token: str = Form("")):
     data = await file.read()
     cohorts = parse_cohort_ids(cohort_ids)
     try:
@@ -527,7 +524,7 @@ async def preview(file: UploadFile = File(...), cohort_ids: str = Form(""),
         return _page(_deals_form(f'<div class="err">Could not read CSV: {html.escape(str(ex))}</div>'),
                      active="deals")
 
-    cfg, client = _get_client(session_cookie, xsrf_token)
+    cfg, client = _get_client(auth_token)
     if cfg is None:
         return _page(_deals_form(client), active="deals")
 
@@ -535,7 +532,7 @@ async def preview(file: UploadFile = File(...), cohort_ids: str = Form(""),
         existing = client.fetch_all()
     except Exception as ex:  # noqa: BLE001
         return _page(_deals_form(f'<div class="err">Failed to fetch existing rules '
-                                 f'(cookies may have expired): {html.escape(str(ex))}</div>'),
+                                 f'(login token may have expired): {html.escape(str(ex))}</div>'),
                      active="deals")
 
     email = (actor or "").strip() or cfg.email
@@ -556,8 +553,7 @@ async def preview(file: UploadFile = File(...), cohort_ids: str = Form(""),
         <input type="hidden" name="csv_b64" value="{csv_b64}">
         <input type="hidden" name="cohort_ids" value="{html.escape(cohort_ids)}">
         <input type="hidden" name="actor" value="{html.escape(actor)}">
-        <input type="hidden" name="session_cookie" value="{html.escape(session_cookie)}">
-        <input type="hidden" name="xsrf_token" value="{html.escape(xsrf_token)}">
+        <input type="hidden" name="auth_token" value="{html.escape(auth_token)}">
         <button class="btn go" type="submit">Confirm &amp; execute ({len(plan.edits)} edits, {len(plan.creates)} creates)</button>
       </form>
     </div>
@@ -568,7 +564,7 @@ async def preview(file: UploadFile = File(...), cohort_ids: str = Form(""),
 
 @app.post("/execute", response_class=HTMLResponse)
 def execute(csv_b64: str = Form(...), cohort_ids: str = Form(""), actor: str = Form(""),
-            session_cookie: str = Form(""), xsrf_token: str = Form("")):
+            auth_token: str = Form("")):
     data = base64.b64decode(csv_b64)
     cohorts = parse_cohort_ids(cohort_ids)
     try:
@@ -581,7 +577,7 @@ def execute(csv_b64: str = Form(...), cohort_ids: str = Form(""), actor: str = F
         return _page(_deals_form(f'<div class="err">Could not read CSV: {html.escape(str(ex))}</div>'),
                      active="deals")
 
-    cfg, client = _get_client(session_cookie, xsrf_token)
+    cfg, client = _get_client(auth_token)
     if cfg is None:
         return _page(_deals_form(client), active="deals")
 
@@ -589,7 +585,7 @@ def execute(csv_b64: str = Form(...), cohort_ids: str = Form(""), actor: str = F
         existing = client.fetch_all()
     except Exception as ex:  # noqa: BLE001
         return _page(_deals_form(f'<div class="err">Failed to fetch existing rules '
-                                 f'(cookies may have expired): {html.escape(str(ex))}</div>'),
+                                 f'(login token may have expired): {html.escape(str(ex))}</div>'),
                      active="deals")
 
     email = (actor or "").strip() or cfg.email
@@ -606,7 +602,7 @@ def execute(csv_b64: str = Form(...), cohort_ids: str = Form(""), actor: str = F
     except Exception:  # noqa: BLE001 - conflict lookup is best-effort
         conflicts = []
     conflict_section = _conflict_section(conflicts, csv_b64, cohort_ids, _retry_set(result),
-                                         session_cookie, xsrf_token, actor)
+                                         auth_token, actor)
     failed_cls = " bad" if result["failed"] else ""
     body = f"""
     <div class="card">
@@ -627,7 +623,7 @@ def execute(csv_b64: str = Form(...), cohort_ids: str = Form(""), actor: str = F
 @app.post("/resolve", response_class=HTMLResponse)
 def resolve(csv_b64: str = Form(...), cohort_ids: str = Form(""), actor: str = Form(""),
             retry_b64: str = Form(...), delete_ids: List[str] = Form(default=[]),
-            session_cookie: str = Form(""), xsrf_token: str = Form("")):
+            auth_token: str = Form("")):
     """Delete the user-selected conflicting rules, then re-run only the items that
     previously failed. Loops back to the resolve UI if conflicts remain."""
     data = base64.b64decode(csv_b64)
@@ -646,7 +642,7 @@ def resolve(csv_b64: str = Form(...), cohort_ids: str = Form(""), actor: str = F
         return _page(_deals_form(f'<div class="err">Could not read CSV: {html.escape(str(ex))}</div>'),
                      active="deals")
 
-    cfg, client = _get_client(session_cookie, xsrf_token)
+    cfg, client = _get_client(auth_token)
     if cfg is None:
         return _page(_deals_form(client), active="deals")
 
@@ -663,7 +659,7 @@ def resolve(csv_b64: str = Form(...), cohort_ids: str = Form(""), actor: str = F
         existing = client.fetch_all()
     except Exception as ex:  # noqa: BLE001
         return _page(_deals_form(f'<div class="err">Failed to fetch existing rules '
-                                 f'(cookies may have expired): {html.escape(str(ex))}</div>'),
+                                 f'(login token may have expired): {html.escape(str(ex))}</div>'),
                      active="deals")
 
     plan = build_plan(targets, existing, email, cohorts)
@@ -680,7 +676,7 @@ def resolve(csv_b64: str = Form(...), cohort_ids: str = Form(""), actor: str = F
     except Exception:  # noqa: BLE001 - conflict lookup is best-effort
         conflicts = []
     conflict_section = _conflict_section(conflicts, csv_b64, cohort_ids, _retry_set(result),
-                                         session_cookie, xsrf_token, actor)
+                                         auth_token, actor)
 
     del_block = ""
     if deleted:

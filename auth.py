@@ -3,14 +3,13 @@ import requests
 BASE_URL = "https://portal.controlgrid.in/api/v1/reward/rules"
 
 
-def build_headers(session_cookie, xsrf_token):
+def build_headers(auth_token):
     return {
         "accept": "*/*",
         "content-type": "application/json",
         "origin": "https://portal.controlgrid.in",
         "referer": "https://portal.controlgrid.in/rules-management/",
-        "x-xsrf-token": xsrf_token,
-        "Cookie": f"SESSION={session_cookie}; XSRF-TOKEN={xsrf_token}",
+        "authorization": f"Bearer {auth_token}",
     }
 
 
@@ -27,10 +26,10 @@ def handle_response(resp):
     return resp.json()
 
 
-def make_post_fn(session_cookie, xsrf_token):
+def make_post_fn(auth_token):
     """Returns post_fn(path, json_body) -> parsed dict for ControlGrid."""
     http = requests.Session()
-    headers = build_headers(session_cookie, xsrf_token)
+    headers = build_headers(auth_token)
 
     def post_fn(path, json_body):
         resp = http.post(BASE_URL + path, json=json_body, headers=headers, timeout=60)
