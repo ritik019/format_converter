@@ -94,15 +94,46 @@ _ALL_RE = re.compile(r"^all(\s+ch.*)?$", re.I)
 _SHEET_ID_RE = re.compile(r"/spreadsheets/d/([A-Za-z0-9_-]+)")
 _GID_RE = re.compile(r"[?&#]gid=(\d+)")
 
-# A warehouse line: 'FCHHYDTEL01<tab/spaces>16' or just 'FCHHYDTEL01'.
-_WH_QTY_RE = re.compile(r"^(FCH[A-Z0-9]+)(?:\s+(\d+))?\s*$")
+# A warehouse entry: 'FCHHYDTEL01<tab/spaces>16', 'FCHHYDTEL01: 1.23', or just
+# 'FCHHYDTEL01'. The separator is whitespace and/or a colon; the quantity may
+# carry a decimal point, which is truncated to a whole number by _warehouse_qty.
+_WH_QTY_RE = re.compile(r"^(FCH[A-Z0-9]+)(?:(?:\s*:\s*|\s+)(\d+(?:\.\d+)?))?\s*$")
 
 # Date cell formats seen in the source ('Sun, 21 Jun'); year is filled in later.
+# Covers: weekday (abbrev/full) prefixes, day-month and month-day order, full or
+# abbreviated month names, 2-/4-digit or missing year, and numeric d/m/y.
 _DATE_FORMATS = [
-    "%a, %d %b", "%a %d %b", "%d %b",
-    "%a, %d %b %Y", "%d %b %Y",
-    "%Y-%m-%d", "%d/%m/%Y",
+    "%a, %d %b", "%a %d %b", "%A, %d %b", "%A %d %b",
+    "%d %b", "%d %B", "%b %d", "%B %d",
+    "%a, %d %b %Y", "%d %b %Y", "%d %B %Y", "%b %d %Y", "%B %d %Y",
+    "%d %b %y", "%d %B %y", "%a, %d %b %y", "%a %d %b %y",
+    "%Y-%m-%d", "%d/%m/%Y", "%d/%m/%y", "%d-%m-%Y", "%d.%m.%Y",
 ]
+
+_ORDINAL_RE = re.compile(r"(\d{1,2})(st|nd|rd|th)\b", re.I)
+# Range separators between two dates: en/em dash, '&', 'to', or a spaced hyphen.
+# A bare hyphen is NOT a separator (keeps numeric dd-mm-yyyy and "21-22 Jun" intact).
+_RANGE_RE = re.compile(r"\s*(?:–|—|&|\bto\b)\s*|\s+-\s+", re.I)
+# "21-22 Jun" — a day-day range sharing one month: keep the first day + the month.
+_DAYDAY_RE = re.compile(r"^(\d{1,2})\s*-\s*\d{1,2}(\s+\D.*)$")
+
+
+def _normalize_date(s):
+    """Tidy a raw date cell so more real-world variants parse: strip non-breaking
+    spaces, take the first date of a range, drop ordinal suffixes (21st -> 21),
+    turn an apostrophe year (Jun'26 -> Jun 26), and collapse punctuation/space."""
+    s = str(s).replace(" ", " ").replace("’", "'").strip()
+    if not s:
+        return ""
+    s = _RANGE_RE.split(s)[0].strip()          # "21 Jun - 25 Jun" -> "21 Jun"
+    m = _DAYDAY_RE.match(s)                     # "21-22 Jun" -> "21 Jun"
+    if m:
+        s = m.group(1) + m.group(2)
+    s = _ORDINAL_RE.sub(r"\1", s)              # "21st Jun" -> "21 Jun"
+    s = re.sub(r"'(\d{2})\b", r" \1", s)       # "Jun'26" -> "Jun 26"
+    s = re.sub(r"([A-Za-z])\.", r"\1", s)      # "Sun. 21 Jun" -> "Sun 21 Jun"
+    s = re.sub(r"\s+", " ", s).strip(" ,.")    # collapse spaces, trim stray .,
+    return s
 
 
 def _today_start_end():
@@ -114,9 +145,21 @@ def _today_start_end():
     return start.strftime(fmt), end.strftime(fmt)
 
 
+def _run_window():
+    """Every converted rule uses a fixed two-day window based on the day the tool is
+    run: start = today 00:00, end = 00:00 of the day after tomorrow. That covers all
+    of today plus all of tomorrow, irrespective of the time of day it is run. The
+    sheet's date column is intentionally ignored."""
+    midnight = datetime.now(IST).replace(hour=0, minute=0, second=0, microsecond=0)
+    start = midnight
+    end = midnight + timedelta(days=2)
+    fmt = "%Y-%m-%d %H:%M:%S"
+    return start.strftime(fmt), end.strftime(fmt)
+
+
 def _parse_start_end(cell, year):
     """('Sun, 21 Jun', 2026) -> ('2026-06-21 00:00:00', '2026-06-22 00:00:00')."""
-    s = str(cell).strip()
+    s = _normalize_date(cell)
     if not s:
         return "", ""
     for fmt in _DATE_FORMATS:
@@ -154,8 +197,17 @@ def _warehouse_qty(cell, all_channels=ALL_CHANNELS):
                 [f"'all' -> {len(all_channels)} channels @ split {ALL_SPLIT}"])
 
     pairs, seen, notes = [], set(), []
+    tokens = []
     for line in str(cell).splitlines():
-        s = line.strip()
+        line = line.strip()
+        if not line:
+            continue
+        # Entries may be comma-separated on one line as well as newline-separated.
+        if "," in line:
+            tokens.extend(t.strip() for t in line.split(","))
+        else:
+            tokens.append(line)
+    for s in tokens:
         if not s:
             continue
         m = _WH_QTY_RE.match(s)
@@ -163,7 +215,7 @@ def _warehouse_qty(cell, all_channels=ALL_CHANNELS):
             notes.append(s)  # non-warehouse text, e.g. a stray '70% INV'
             continue
         wid = m.group(1)
-        qty = int(m.group(2)) if m.group(2) else None
+        qty = int(float(m.group(2))) if m.group(2) else None  # decimals truncated to whole units
         if wid in seen:
             notes.append(f"duplicate {wid} dropped")
             continue
@@ -213,7 +265,6 @@ def convert_rows(rows, year=None, all_region="all"):
     except KeyError as e:
         raise ValueError(f"Missing expected header column: {e}")
 
-    date_idx = 0
     status_idx = mov_idx - 1
 
     def cell(row, idx):
@@ -221,7 +272,9 @@ def convert_rows(rows, year=None, all_region="all"):
 
     out = [list(TARGET_HEADER)]
     warnings = []
-    last_date = ""  # carry the date down (handles merged cells / deleted rows)
+    # One fixed window for the whole run: today 00:00 -> day-after-tomorrow 00:00
+    # (all of today + all of tomorrow). The sheet's date column is ignored by design.
+    start_time, end_time = _run_window()
 
     for r in range(header_idx + 1, len(rows)):
         row = rows[r]
@@ -241,13 +294,6 @@ def convert_rows(rows, year=None, all_region="all"):
         # Active by default; only FALSE when the status column explicitly says so.
         status = cell(row, status_idx).strip().lower()
         activation = "FALSE" if status in _INACTIVE_STATUSES else "TRUE"
-        raw_date = cell(row, date_idx)
-        if raw_date:
-            last_date = raw_date  # remember most recent date for blank rows below
-        start_time, end_time = _parse_start_end(last_date, year)
-        if not start_time:
-            start_time, end_time = _today_start_end()
-            warnings.append(f"Line {line} ({name}): no usable date {raw_date!r} - defaulted to today")
         threshold, mov_err = _cart_threshold(cell(row, mov_idx))
         if mov_err:
             warnings.append(f"Line {line} ({name}): {mov_err}")
