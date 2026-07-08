@@ -71,7 +71,7 @@ ALL_CHANNELS = [
     "FCHBLRNAG01", "FCHBLRSJR01", "FCHBLRTHA01", "FCHHYDKND01", "FCHHYDMDL02",
     "FCHHYDNAR01", "FCHHYDNIZ01", "FCHHYDTEL01",
 ]
-ALL_SPLIT = 20  # split_number used for every channel when "all" is given
+ALL_SPLIT = 40  # split_number used for every channel when "all" is given
 
 # Region subsets of "all", keyed by warehouse-id prefix.
 BLR_CHANNELS = [c for c in ALL_CHANNELS if c.startswith("FCHBLR")]
