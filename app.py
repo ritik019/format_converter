@@ -70,10 +70,12 @@ _STYLE = """
  h1{font-size:20px;margin:0 0 6px} h2{font-size:16px;margin:0 0 8px}
  .sub{color:#6b7280;font-size:13px;margin:0 0 8px}
  label{display:block;font-weight:600;font-size:13px;margin:16px 0 6px;color:#374151}
- input[type=text],input[type=file],textarea,select{width:100%;padding:9px 11px;border:1px solid #d4d7dc;
-       border-radius:8px;font:inherit;background:#fff;color:#1f2328}
+ input[type=text],input[type=file],input[type=datetime-local],textarea,select{width:100%;padding:9px 11px;
+       border:1px solid #d4d7dc;border-radius:8px;font:inherit;background:#fff;color:#1f2328}
  input:focus,textarea:focus,select:focus{outline:none;border-color:#0a7d33;box-shadow:0 0 0 3px rgba(10,125,51,.12)}
  textarea{min-height:60px;resize:vertical}
+ .field-row{display:flex;gap:14px;flex-wrap:wrap}
+ .field-row .field-col{flex:1;min-width:200px}
  .btn{display:inline-flex;align-items:center;gap:7px;margin-top:18px;background:#111827;color:#fff;border:0;
       padding:10px 16px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer}
  .btn:hover{opacity:.93}
@@ -178,6 +180,16 @@ def _convert_form(message=""):
           <option value="blr">BLR only</option>
           <option value="hyd">HYD only</option>
         </select>
+        <div class="field-row">
+          <div class="field-col">
+            <label>Start date &amp; time <span class="muted">(optional &mdash; defaults to today, midnight)</span></label>
+            <input type="datetime-local" name="start_date">
+          </div>
+          <div class="field-col">
+            <label>End date &amp; time <span class="muted">(optional &mdash; defaults to start + 1 day)</span></label>
+            <input type="datetime-local" name="end_date">
+          </div>
+        </div>
         <button class="btn go" type="submit">Convert &amp; download</button>
       </form>
     </div>
@@ -197,14 +209,17 @@ def convert_get():
 
 @app.post("/convert")
 async def convert(file: UploadFile = File(None), sheet_url: str = Form(""),
-                  all_region: str = Form("all")):
+                  all_region: str = Form("all"), start_date: str = Form(""),
+                  end_date: str = Form("")):
     sheet_url = (sheet_url or "").strip()
     try:
         if sheet_url:
-            out_bytes, warnings = convert_split.convert_from_sheet(sheet_url, all_region=all_region)
+            out_bytes, warnings = convert_split.convert_from_sheet(
+                sheet_url, all_region=all_region, start_date=start_date, end_date=end_date)
             name = "sheet"
         elif file is not None:
-            out_bytes, warnings = convert_split.convert_csv_bytes(await file.read(), all_region=all_region)
+            out_bytes, warnings = convert_split.convert_csv_bytes(
+                await file.read(), all_region=all_region, start_date=start_date, end_date=end_date)
             name = (file.filename or "sheet").rsplit(".", 1)[0]
         else:
             return _page(_convert_form('<div class="err">Provide a Google Sheet link or upload a CSV.</div>'),

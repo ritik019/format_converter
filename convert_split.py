@@ -146,13 +146,21 @@ def _today_start_end():
 
 
 def _run_window():
-    """Every converted rule uses a fixed one-day window based on the day the tool is
-    run: start = today 00:00, end = tomorrow 00:00. That covers all of today,
-    irrespective of the time of day it is run. The sheet's date column is
-    intentionally ignored."""
+    """Default window when no start/end date is given on the form: today 00:00
+    -> tomorrow 00:00. The sheet's own date column is intentionally ignored."""
     midnight = datetime.now(IST).replace(hour=0, minute=0, second=0, microsecond=0)
     start = midnight
     end = midnight + timedelta(days=1)
+    fmt = "%Y-%m-%d %H:%M:%S"
+    return start.strftime(fmt), end.strftime(fmt)
+
+
+def _window_from_dates(start_date, end_date):
+    """('2026-07-09T09:30', '2026-07-10T09:30') -> ('2026-07-09 09:30:00',
+    '2026-07-10 09:30:00'), from the form's <input type=datetime-local> fields.
+    end_date defaults to start_date + 1 day (same time) when left blank."""
+    start = datetime.strptime(start_date, "%Y-%m-%dT%H:%M")
+    end = datetime.strptime(end_date, "%Y-%m-%dT%H:%M") if end_date else start + timedelta(days=1)
     fmt = "%Y-%m-%d %H:%M:%S"
     return start.strftime(fmt), end.strftime(fmt)
 
@@ -246,11 +254,13 @@ def _cart_threshold(mov):
     return (str(int(n)) if n == int(n) else str(n)), None
 
 
-def convert_rows(rows, year=None, all_region="all"):
+def convert_rows(rows, year=None, all_region="all", start_date="", end_date=""):
     """Convert source rows (list-of-lists) -> (target_rows, warnings).
 
     all_region ('all'|'blr'|'hyd') decides which channels a literal "all" in the
-    warehouse cell expands to.
+    warehouse cell expands to. start_date/end_date ('YYYY-MM-DD', from the form's
+    date pickers) set every rule's window; left blank, it defaults to today 00:00
+    -> tomorrow 00:00.
     """
     if year is None:
         year = datetime.now(IST).year
@@ -272,9 +282,9 @@ def convert_rows(rows, year=None, all_region="all"):
 
     out = [list(TARGET_HEADER)]
     warnings = []
-    # One fixed window for the whole run: today 00:00 -> day-after-tomorrow 00:00
-    # (all of today + all of tomorrow). The sheet's date column is ignored by design.
-    start_time, end_time = _run_window()
+    # One fixed window for the whole run, from the form's date pickers if given,
+    # else today 00:00 -> tomorrow 00:00. The sheet's own date column is ignored.
+    start_time, end_time = _window_from_dates(start_date, end_date) if start_date else _run_window()
 
     for r in range(header_idx + 1, len(rows)):
         row = rows[r]
@@ -313,11 +323,12 @@ def convert_rows(rows, year=None, all_region="all"):
     return out, warnings
 
 
-def convert_csv_bytes(data, year=None, all_region="all"):
+def convert_csv_bytes(data, year=None, all_region="all", start_date="", end_date=""):
     """CSV bytes -> (converted CSV bytes, warnings)."""
     text = data.decode("utf-8-sig")
     rows = list(csv.reader(io.StringIO(text)))
-    out_rows, warnings = convert_rows(rows, year=year, all_region=all_region)
+    out_rows, warnings = convert_rows(rows, year=year, all_region=all_region,
+                                      start_date=start_date, end_date=end_date)
     buf = io.StringIO()
     csv.writer(buf).writerows(out_rows)
     return buf.getvalue().encode("utf-8"), warnings
@@ -347,9 +358,10 @@ def fetch_sheet_csv(url_or_id):
     return data
 
 
-def convert_from_sheet(url_or_id, year=None, all_region="all"):
+def convert_from_sheet(url_or_id, year=None, all_region="all", start_date="", end_date=""):
     """Fetch a Google Sheet by URL/id and convert it -> (CSV bytes, warnings)."""
-    return convert_csv_bytes(fetch_sheet_csv(url_or_id), year=year, all_region=all_region)
+    return convert_csv_bytes(fetch_sheet_csv(url_or_id), year=year, all_region=all_region,
+                              start_date=start_date, end_date=end_date)
 
 
 def main(argv=None):
