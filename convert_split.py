@@ -146,13 +146,13 @@ def _today_start_end():
 
 
 def _run_window():
-    """Every converted rule uses a fixed two-day window based on the day the tool is
-    run: start = today 00:00, end = 00:00 of the day after tomorrow. That covers all
-    of today plus all of tomorrow, irrespective of the time of day it is run. The
-    sheet's date column is intentionally ignored."""
+    """Every converted rule uses a fixed one-day window based on the day the tool is
+    run: start = today 00:00, end = tomorrow 00:00. That covers all of today,
+    irrespective of the time of day it is run. The sheet's date column is
+    intentionally ignored."""
     midnight = datetime.now(IST).replace(hour=0, minute=0, second=0, microsecond=0)
     start = midnight
-    end = midnight + timedelta(days=2)
+    end = midnight + timedelta(days=1)
     fmt = "%Y-%m-%d %H:%M:%S"
     return start.strftime(fmt), end.strftime(fmt)
 
