@@ -9,7 +9,7 @@ Google Sheet, and download the converted file.
   - quantity **> 5** → PARTIAL, `split_number` = quantity
   - quantity **≤ 5** or none → FULL, `split_number` blank
 - `all` / `all ch` → every channel as PARTIAL with `split_number` 20
-- `cart_value_threshold` = `mov − 14`
+- `cart_value_threshold` = `mov − 12`
 - One filled row per warehouse; `title` and `cart_description` use fixed defaults;
   `tag` / `split_percentage` / `deal_price` are left empty.
 

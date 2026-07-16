@@ -239,7 +239,7 @@ def _consumption(qty):
     return "TRUE", "FALSE", ""  # qty<=5 or missing -> FULL, no split
 
 
-MOV_OFFSET = 14  # cart_value_threshold = mov - 14 (e.g. 499 -> 485)
+MOV_OFFSET = 12  # cart_value_threshold = mov - 12 (e.g. 499 -> 487)
 
 
 def _cart_threshold(mov):
