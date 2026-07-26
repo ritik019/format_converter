@@ -16,6 +16,11 @@ Quantity rules
   qty <= 5     -> FULL,    split_number blank
   no quantity  -> FULL,    split_number blank
 
+The ``split`` column (if present) overrides the above (case-insensitive):
+  "Full"    -> every warehouse on the row forced to FULL, split_number blank
+  "Partial" -> every warehouse on the row forced to PARTIAL, split_number = qty
+               (even when qty <= 5 or missing)
+
 Output (one filled row per warehouse)::
 
   rule_name, rule_type, activation, rule_description, start_time, end-time, tag,
@@ -274,6 +279,7 @@ def convert_rows(rows, year=None, all_region="all", start_date="", end_date=""):
         fcn_idx = labels["fcn"]
     except KeyError as e:
         raise ValueError(f"Missing expected header column: {e}")
+    split_idx = labels.get("split")
 
     status_idx = mov_idx - 1
 
@@ -301,6 +307,14 @@ def convert_rows(rows, year=None, all_region="all", start_date="", end_date=""):
             warnings.append(f"Line {line} ({name or fcn or '?'}): no warehouse ids found - row skipped")
             continue
 
+        # split column overrides the qty-based FULL/PARTIAL call for every
+        # warehouse on this row, regardless of quantity: "Full" forces FULL
+        # (split_number blank), "Partial" forces PARTIAL (split_number = qty,
+        # even when qty <= 5 or missing).
+        split_value = cell(row, split_idx).strip().lower() if split_idx is not None else ""
+        force_full = split_value == "full"
+        force_partial = split_value == "partial"
+
         # Active by default; only FALSE when the status column explicitly says so.
         status = cell(row, status_idx).strip().lower()
         activation = "FALSE" if status in _INACTIVE_STATUSES else "TRUE"
@@ -314,7 +328,12 @@ def convert_rows(rows, year=None, all_region="all", start_date="", end_date=""):
             REPLENISHMENT_TYPE, fcn, TITLE_DEFAULT,
         ]
         for wid, qty in pairs:
-            full, partial, split_number = _consumption(qty)
+            if force_full:
+                full, partial, split_number = "TRUE", "FALSE", ""
+            elif force_partial:
+                full, partial, split_number = "FALSE", "TRUE", (str(qty) if qty is not None else "")
+            else:
+                full, partial, split_number = _consumption(qty)
             out.append(prefix + [
                 wid, full, partial, "", split_number, threshold,
                 CART_DESCRIPTION_DEFAULT, "",
