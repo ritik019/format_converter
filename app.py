@@ -19,7 +19,7 @@ Subpath-safe: every form action is relative, so it works under an nginx subpath.
 import base64
 import html
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List
 
 from fastapi import FastAPI, UploadFile, File, Form
@@ -164,6 +164,9 @@ def _convert_form(message=""):
         "Each warehouse line carries a quantity (<code>FCHHYDTEL01&nbsp;&nbsp;16</code>): "
         "quantity &gt; 5 &rarr; PARTIAL with <b>split_number</b> = qty; quantity &le; 5 or "
         "none &rarr; FULL. <code>all</code> / <code>all ch</code> &rarr; every channel as PARTIAL 20.")
+    midnight = datetime.now(IST).replace(hour=0, minute=0, second=0, microsecond=0)
+    default_start = midnight.strftime("%Y-%m-%dT%H:%M")
+    default_end = (midnight + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M")
     return f"""
     <div class="card">
       <h1>Sheet &rarr; CSV converter</h1>
@@ -182,12 +185,12 @@ def _convert_form(message=""):
         </select>
         <div class="field-row">
           <div class="field-col">
-            <label>Start date &amp; time <span class="muted">(optional &mdash; defaults to today, midnight)</span></label>
-            <input type="datetime-local" name="start_date">
+            <label>Start date &amp; time <span class="muted">(defaults to today, midnight)</span></label>
+            <input type="datetime-local" name="start_date" value="{default_start}">
           </div>
           <div class="field-col">
-            <label>End date &amp; time <span class="muted">(optional &mdash; defaults to start + 1 day)</span></label>
-            <input type="datetime-local" name="end_date">
+            <label>End date &amp; time <span class="muted">(defaults to start + 1 day)</span></label>
+            <input type="datetime-local" name="end_date" value="{default_end}">
           </div>
         </div>
         <button class="btn go" type="submit">Convert &amp; download</button>
