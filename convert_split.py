@@ -12,14 +12,16 @@ per-warehouse quantity on each line, e.g.::
 
 Quantity rules
 --------------
-  qty > 5      -> PARTIAL, split_number = qty
-  qty <= 5     -> FULL,    split_number blank
-  no quantity  -> FULL,    split_number blank
+  qty given, qty < 10  -> PARTIAL, split_number = 10 (floored - a real qty is
+                          too low to be a useful split threshold)
+  qty given, qty >= 10 -> PARTIAL, split_number = qty
+  no quantity          -> FULL,    split_number blank
 
 The ``split`` column (if present) overrides the above (case-insensitive):
   "Full"    -> every warehouse on the row forced to FULL, split_number blank
   "Partial" -> every warehouse on the row forced to PARTIAL, split_number = qty
-               (even when qty <= 5 or missing)
+               (floored to 10 same as above), or ALL_SPLIT (40) when the
+               warehouse has no per-line quantity at all
 
 Output (one filled row per warehouse)::
 
@@ -58,7 +60,7 @@ REPLENISHMENT_TYPE = "DAILY"
 TITLE_DEFAULT = "Unlock Special Price Deal : Limited stock"
 CART_DESCRIPTION_DEFAULT = "Add items worth Rs.$$$ more to unlock"
 
-FULL_QTY_THRESHOLD = 5  # qty <= this -> FULL (no split)
+PARTIAL_QTY_FLOOR = 10  # a given qty below this is floored to this split_number
 
 # Rules are ACTIVE by default; a row is only inactive if the status column
 # explicitly says one of these.
@@ -70,11 +72,13 @@ _INACTIVE_STATUSES = {
 # PARTIAL with this split_number.
 ALL_CHANNELS = [
     "FCHBLRDOD01", "FCHBLRELC01", "FCHBLRHEB01", "FCHBLRHOO01", "FCHBLRHSAF01",
-    "FCHBLRHSR01", "FCHBLRIND01", "FCHBLRJAY01", "FCHBLRKNP01", "FCHBLRRAJ01",
-    "FCHBLRVAR01", "FCHBLRWHF01", "FCHBLRAECS01", "FCHBLRBEN01", "FCHBLRBHO01",
-    "FCHBLRHAR01", "FCHBLRHOR01", "FCHBLRJPN01", "FCHBLRKOR01",
-    "FCHBLRMDP01", "FCHBLRNAG01", "FCHBLRSJR01", "FCHBLRTHA01", "FCHHYDKND01",
-    "FCHHYDNAR01", "FCHHYDNIZ01", "FCHHYDTEL01", "FCHHYDJHB01", "FCHHYDMOS01",
+    "FCHBLRHSR01", "FCHBLRIND01", "FCHBLRJAY01", "FCHBLRJMH01", "FCHBLRKNP01",
+    "FCHBLRRAJ01", "FCHBLRVAR01", "FCHBLRWHF01", "FCHBLRYEL01", "FCHBLRAECS01",
+    "FCHBLRBEN01", "FCHBLRBHO01", "FCHBLRHAR01", "FCHBLRHOR01", "FCHBLRJPN01",
+    "FCHBLRKOR01", "FCHBLRMDP01", "FCHBLRNAG01", "FCHBLRSJR01", "FCHBLRTHA01",
+    "FCHHYDGCH01", "FCHHYDHAF01", "FCHHYDJHB01", "FCHHYDKND01",
+    "FCHHYDKOM01", "FCHHYDKTH01", "FCHHYDMOS01", "FCHHYDNAR01",
+    "FCHHYDNIZ01", "FCHHYDTEL01",
 ]
 ALL_SPLIT = 40  # split_number used for every channel when "all" is given
 
@@ -239,9 +243,10 @@ def _warehouse_qty(cell, all_channels=ALL_CHANNELS):
 
 def _consumption(qty):
     """qty -> (full, partial, split_number) cell strings."""
-    if qty is not None and qty > FULL_QTY_THRESHOLD:
-        return "FALSE", "TRUE", str(qty)
-    return "TRUE", "FALSE", ""  # qty<=5 or missing -> FULL, no split
+    if qty is None:
+        return "TRUE", "FALSE", ""  # no quantity -> FULL, no split
+    split_number = qty if qty >= PARTIAL_QTY_FLOOR else PARTIAL_QTY_FLOOR
+    return "FALSE", "TRUE", str(split_number)
 
 
 MOV_OFFSET = 12  # cart_value_threshold = mov - 12 (e.g. 499 -> 487)
@@ -310,7 +315,8 @@ def convert_rows(rows, year=None, all_region="all", start_date="", end_date=""):
         # split column overrides the qty-based FULL/PARTIAL call for every
         # warehouse on this row, regardless of quantity: "Full" forces FULL
         # (split_number blank), "Partial" forces PARTIAL (split_number = qty,
-        # even when qty <= 5 or missing).
+        # floored to PARTIAL_QTY_FLOOR, or ALL_SPLIT when the warehouse has no
+        # quantity at all).
         split_value = cell(row, split_idx).strip().lower() if split_idx is not None else ""
         force_full = split_value == "full"
         force_partial = split_value == "partial"
@@ -331,7 +337,11 @@ def convert_rows(rows, year=None, all_region="all", start_date="", end_date=""):
             if force_full:
                 full, partial, split_number = "TRUE", "FALSE", ""
             elif force_partial:
-                full, partial, split_number = "FALSE", "TRUE", (str(qty) if qty is not None else "")
+                if qty is None:
+                    split_number = ALL_SPLIT
+                else:
+                    split_number = qty if qty >= PARTIAL_QTY_FLOOR else PARTIAL_QTY_FLOOR
+                full, partial, split_number = "FALSE", "TRUE", str(split_number)
             else:
                 full, partial, split_number = _consumption(qty)
             out.append(prefix + [
