@@ -1,8 +1,9 @@
 import json
 
-# Conflicts can be raised against either freebie rule family, so the type-index
-# lookup sweeps both. fetch_all (the planner's source of truth) stays FREEBIE_DEALS.
-FREEBIE_RULE_TYPES = ["FREEBIE_DEALS", "FREEBIE_CART_VALUE"]
+# Conflicts can be raised against either freebie rule family or the referral
+# rule, so the type-index lookup sweeps all three. fetch_all (the planner's source
+# of truth) stays FREEBIE_DEALS.
+FREEBIE_RULE_TYPES = ["FREEBIE_DEALS", "FREEBIE_CART_VALUE", "REFERRER"]
 
 
 class ControlGrid:

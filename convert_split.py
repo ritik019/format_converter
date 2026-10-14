@@ -44,6 +44,7 @@ import sys
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
+
 IST = timezone(timedelta(hours=5, minutes=30))
 
 TARGET_HEADER = [
@@ -69,17 +70,33 @@ _INACTIVE_STATUSES = {
 }
 
 # When the warehouse cell says "all" / "all ch", apply every channel as
-# PARTIAL with this split_number.
-ALL_CHANNELS = [
-    "FCHBLRDOD01", "FCHBLRELC01", "FCHBLRHEB01", "FCHBLRHOO01", "FCHBLRHSAF01",
-    "FCHBLRHSR01", "FCHBLRIND01", "FCHBLRJAY01", "FCHBLRJMH01", "FCHBLRKNP01",
-    "FCHBLRRAJ01", "FCHBLRVAR01", "FCHBLRWHF01", "FCHBLRYEL01", "FCHBLRAECS01",
-    "FCHBLRBEN01", "FCHBLRBHO01", "FCHBLRHAR01", "FCHBLRHOR01", "FCHBLRJPN01",
-    "FCHBLRKOR01", "FCHBLRMDP01", "FCHBLRNAG01", "FCHBLRSJR01", "FCHBLRTHA01",
-    "FCHHYDGCH01", "FCHHYDHAF01", "FCHHYDJHB01", "FCHHYDKND01",
-    "FCHHYDKOM01", "FCHHYDKTH01", "FCHHYDMOS01", "FCHHYDNAR01",
+# PARTIAL with this split_number. The channel list is the business CH list, kept
+# identical to Catalogue Ops (catalogue-platform tools/offer_dashboard/config.py)
+# - update both together. Updated 14-Oct-2026: added CXT, NWF and HIM.
+BLR_CH = [
+    "FCHBLRAECS01", "FCHBLRBEN01", "FCHBLRBHO01", "FCHBLRCXT01", "FCHBLRDOD01",
+    "FCHBLRELC01", "FCHBLRHAR01", "FCHBLRHEB01", "FCHBLRHOO01", "FCHBLRHOR01",
+    "FCHBLRHSAF01", "FCHBLRHSR01", "FCHBLRIND01", "FCHBLRJAY01", "FCHBLRJPN01",
+    "FCHBLRKNP01", "FCHBLRKOR01", "FCHBLRMDP01", "FCHBLRNAG01", "FCHBLRNWF01",
+    "FCHBLRRAJ01", "FCHBLRSJR01", "FCHBLRTHA01", "FCHBLRVAR01", "FCHBLRWHF01",
+    "FCHBLRYEL01",
+]
+HYD_CH = [
+    "FCHHYDCYB03", "FCHHYDGCH01", "FCHHYDHAF01", "FCHHYDHIM01", "FCHHYDJHB01",
+    "FCHHYDKND01", "FCHHYDKOM01", "FCHHYDKTH01", "FCHHYDMOS01", "FCHHYDNAR01",
     "FCHHYDNIZ01", "FCHHYDTEL01",
 ]
+ALL_CH = BLR_CH + HYD_CH
+
+# FCHBLRJMH01 is never part of "all" (user, 14-Oct-2026). JMH is the placeholder
+# a retiring rule is stripped down to, so that rule still holds the FSN at JMH
+# for the rest of its window; putting JMH in "all" made every replacement create
+# fail with "Timeline overlap ... in warehouse 'FCHBLRJMH01'". FCHHYDCYB03 is left
+# out too: the user's 14-Oct list of CHs to add named CXT, NWF and HIM only.
+# A row that names either id explicitly still gets it.
+EXCLUDED_FROM_ALL = {"FCHBLRJMH01", "FCHHYDCYB03"}
+
+ALL_CHANNELS = [c for c in ALL_CH if c not in EXCLUDED_FROM_ALL]
 ALL_SPLIT = 40  # split_number used for every channel when "all" is given
 
 # Region subsets of "all", keyed by warehouse-id prefix.

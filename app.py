@@ -17,6 +17,7 @@ Deploy:       uvicorn app:app --host 0.0.0.0 --port $PORT
 Subpath-safe: every form action is relative, so it works under an nginx subpath.
 """
 import base64
+import time
 import html
 import json
 from datetime import datetime, timedelta
@@ -32,7 +33,10 @@ try:  # works inside the freebie package and as a flat deploy repo (files at roo
     from freebie.sheet import rows_from_csv_bytes, parse_and_validate, parse_cohort_ids
     from freebie.controlgrid import ControlGrid
     from freebie.planner import build_plan, render_preview, execute_plan, filter_plan
-    from freebie.conflicts import collect_conflicts
+    from freebie.conflicts import (RULE_TYPE_LABELS, collect_conflicts, explain_failures,
+                                   predict_conflicts)
+    from freebie.referral_guard import REFERRAL_RULE_ID
+    from freebie.summary import summary_csv, summary_rows
     from freebie.models import ValidationError
 except ImportError:  # pragma: no cover - deploy layout (files at repo root)
     from config import Config
@@ -41,7 +45,10 @@ except ImportError:  # pragma: no cover - deploy layout (files at repo root)
     from sheet import rows_from_csv_bytes, parse_and_validate, parse_cohort_ids
     from controlgrid import ControlGrid
     from planner import build_plan, render_preview, execute_plan, filter_plan
-    from conflicts import collect_conflicts
+    from conflicts import (RULE_TYPE_LABELS, collect_conflicts, explain_failures,
+                           predict_conflicts)
+    from referral_guard import REFERRAL_RULE_ID
+    from summary import summary_csv, summary_rows
     from models import ValidationError
 
 try:
@@ -125,14 +132,18 @@ _STYLE = """
  .chip.paused{background:#fffaeb;color:#92400e}
  .chip.cohort{background:#eef2ff;color:#3730a3;cursor:default}
  .chip.none{background:#f4f5f6;color:#9aa1ab}
+ .chip.risk-high{background:#fef3f2;color:#b42318;font-weight:600}
+ .chip.risk-medium{background:#fffaeb;color:#92400e;font-weight:600}
+ .chip.risk-low{background:#ecfdf3;color:#067647;font-weight:600}
+ .chip.risk-referral{background:#eef2ff;color:#3730a3;font-weight:600}
+ .why{font-size:12px;color:#6b7280;margin-top:4px;white-space:normal}
  .pairs{font-size:12.5px;color:#374151;white-space:nowrap}
 </style>
 """
 
-RULE_TYPE_LABELS = {
-    "FREEBIE_DEALS": "Freebie Deal",
-    "FREEBIE_CART_VALUE": "Freebie Cart Value",
-}
+# Rule types the conflict table never offers for deletion. The referral rule is
+# shared by every product on referral; the fix is to drop the FSN from the sheet.
+UNDELETABLE_TYPES = {"REFERRER"}
 
 
 def _nav(active):
@@ -270,12 +281,63 @@ def _deals_form(message=""):
     """
 
 
-def _failed_block(result):
-    if not result["failed"]:
+def _blocker_text(b):
+    rule_type = RULE_TYPE_LABELS.get(b["rule_type"], b["rule_type"] or "unknown type")
+    name = f" '{html.escape(b['name'])}'" if b.get("name") else ""
+    return f"{html.escape(rule_type)} rule{name} (id: <code>{html.escape(b['id'])}</code>)"
+
+
+def _failed_block(explained):
+    """explained: [(kind, ident, err, blockers)] from explain_failures. Each failure
+    says which rule blocked it and of what type, when that can be found."""
+    if not explained:
         return ""
-    items = "".join(f"<li>{html.escape(k)} {html.escape(str(i))}: {html.escape(e)}</li>"
-                    for k, i, e in result["failed"])
-    return f'<div class="err"><b>Failures:</b><ul>{items}</ul></div>'
+    items = []
+    for k, i, e, blockers in explained:
+        line = f"{html.escape(k)} {html.escape(str(i))}: {html.escape(e)}"
+        if blockers:
+            line += "<br><b>&rarr; Blocked by:</b> " + "; ".join(_blocker_text(b) for b in blockers)
+        elif "overlap" in e.lower() or "conflict" in e.lower():
+            line += "<br><b>&rarr; Blocked by:</b> rule not found (it may have ended or been deleted)"
+        items.append(f"<li>{line}</li>")
+    return f'<div class="err"><b>Failures:</b><ul>{"".join(items)}</ul></div>'
+
+
+def _plan_windows(plan):
+    """(kind, ident) -> (start_ms, end_ms) of each requested rule, to find which
+    existing rule a 'Timeline overlap' error collided with."""
+    out = {}
+    for e in plan.edits:
+        out[("edit", str(e["ruleId"]))] = (e["rule"]["startTime"], e["rule"]["endTime"])
+    for c in plan.creates:
+        out[("create", c["rule"]["name"])] = (c["rule"]["startTime"], c["rule"]["endTime"])
+    return out
+
+
+def _explain(result, client, plan):
+    """Failures annotated with their blocking rules, the grouped conflicts, and
+    the rule index they came from. With no failures only the referral rule is
+    fetched (the summary still says which FSNs are on it). Best-effort: without
+    the index the raw errors still show."""
+    try:
+        index = client.fetch_index() if result["failed"] else client.fetch_index(["REFERRER"])
+    except Exception:  # noqa: BLE001 - conflict lookup is best-effort
+        index = {}
+    explained = explain_failures(result["failed"], index, _plan_windows(plan))
+    return explained, collect_conflicts(explained), index
+
+
+def _summary_block(plan, result, explained, index, deleted=(), delete_failed=()):
+    """Download link for the run summary CSV, built in the page so nothing is stored."""
+    rows = summary_rows(plan, result, explained, index, deleted, delete_failed)
+    if not rows:
+        return ""
+    data = base64.b64encode(summary_csv(rows).encode("utf-8")).decode()
+    name = datetime.now(IST).strftime("freebie_run_summary_%Y%m%d_%H%M.csv")
+    note = "" if index else (" <span class='muted'>(referral check unavailable: "
+                             "the rule lookup failed)</span>")
+    return (f'<a class="btn" download="{name}" href="data:text/csv;base64,{data}">'
+            f'Download summary CSV ({len(rows)} rows)</a>{note}')
 
 
 def _retry_set(result):
@@ -450,13 +512,19 @@ def _conflict_section(conflicts, csv_b64, cohort_ids, retry, auth_token="", acto
             seen_types.append(rule_type)
         pairs = "<br>".join(f"{html.escape(f)} &times; {html.escape(w)}" for f, w in c["pairs"])
         summary_html, summary_text = _conflict_summary(c.get("info") or {})
+        if c["rule_type"] in UNDELETABLE_TYPES:
+            del_cell = ("<td title='Never deleted from here: remove the FSN from your "
+                        "sheet instead'>&mdash;</td>")
+        else:
+            del_cell = (f"<td><input type='checkbox' name='delete_ids' "
+                        f"value='{html.escape(c['id'])}'></td>")
         data_text = " ".join([
             c.get("name") or "", c["id"], rule_type, summary_text,
             " ".join(f"{f} {w}" for f, w in c["pairs"]),
         ]).lower()
         rows.append(
             f"<tr data-type=\"{html.escape(rule_type)}\" data-text=\"{html.escape(data_text)}\">"
-            f"<td><input type='checkbox' name='delete_ids' value='{html.escape(c['id'])}'></td>"
+            f"{del_cell}"
             f"<td><div class='rname'>{html.escape(c['name'] or '')}</div>"
             f"<div class='rid'><code>{html.escape(c['id'])}</code></div>"
             f"{summary_html}</td>"
@@ -500,6 +568,106 @@ def _conflict_section(conflicts, csv_b64, cohort_ids, retry, auth_token="", acto
     </div>
     """
     return table + _CONFLICT_JS
+
+
+def _delete_rules(client, delete_ids, email):
+    """Delete the ticked rules; the referral rule is refused even if its id is posted."""
+    deleted, delete_failed = [], []
+    for rid in delete_ids:
+        if rid == REFERRAL_RULE_ID:
+            delete_failed.append((rid, "the referral rule is never deleted from this tool"))
+            continue
+        try:
+            client.delete_rule(rid, email)
+            deleted.append(rid)
+        except Exception as ex:  # noqa: BLE001 - report and continue
+            delete_failed.append((rid, str(ex)))
+    return deleted, delete_failed
+
+
+def _delete_block(deleted, delete_failed):
+    out = ""
+    if deleted:
+        ids = ", ".join(f"<code>{html.escape(d)}</code>" for d in deleted)
+        out += f'<div class="ok">Deleted {len(deleted)} conflicting rule(s): {ids}</div>'
+    if delete_failed:
+        items = "".join(f"<li><code>{html.escape(i)}</code>: {html.escape(e)}</li>"
+                        for i, e in delete_failed)
+        out += f'<div class="err"><b>Could not delete:</b><ul>{items}</ul></div>'
+    return out
+
+
+_STATE_CHIP = {"live": ("Live now", "active"), "upcoming": ("Upcoming", "paused"),
+               "expired": ("Expired", "none"), "unknown": ("Window unknown", "none")}
+
+_BLOCKERS_JS = """
+<script>
+(function(){
+  var f = document.getElementById('exec-form');
+  if(!f) return;
+  var btn = f.querySelector('button[type=submit]');
+  var base = btn.getAttribute('data-label');
+  function ticked(){ return f.querySelectorAll('input[name=delete_ids]:checked').length; }
+  function sync(){
+    var n = ticked();
+    btn.textContent = n ? ('Delete ' + n + ' rule(s) & execute') : base;
+    btn.className = n ? 'btn danger' : 'btn go';
+  }
+  f.addEventListener('change', sync);
+  f.addEventListener('submit', function(e){
+    var n = ticked();
+    if(n && !confirm('Delete ' + n + ' rule(s) on ControlGrid before executing? This cannot be undone.'))
+      e.preventDefault();
+  });
+  sync();
+})();
+</script>
+"""
+
+
+def _blockers_section(blockers):
+    """Preview-time table of rules that will block the plan, each with type, live /
+    expired state and deletion risk. Tick boxes post with the execute form."""
+    if not blockers:
+        return ('<div class="ok" style="margin-top:14px">No existing rule blocks this plan: '
+                'nothing to delete before executing.</div>')
+    rows = []
+    for c in blockers:
+        level, why = c["risk"]
+        rule_type = RULE_TYPE_LABELS.get(c["rule_type"], c["rule_type"] or "—")
+        state_text, state_cls = _STATE_CHIP.get(c["state"], _STATE_CHIP["unknown"])
+        summary_html, _text = _conflict_summary(c.get("info") or {})
+        if c["rule_type"] in UNDELETABLE_TYPES:
+            del_cell = "<td title='Never deleted from here'>&mdash;</td>"
+        else:
+            del_cell = (f"<td><input type='checkbox' name='delete_ids' "
+                        f"value='{html.escape(c['id'])}'></td>")
+        pairs = "<br>".join(f"{html.escape(f)} &times; {html.escape(w)}" for f, w in c["pairs"])
+        blocks = "<br>".join(html.escape(b) for b in c["blocks"])
+        rows.append(
+            "<tr>" + del_cell +
+            f"<td><div class='rname'>{html.escape(c['name'])}</div>"
+            f"<div class='rid'><code>{html.escape(c['id'])}</code></div>{summary_html}</td>"
+            f"<td>{_chip(html.escape(rule_type))}<br>{_chip(state_text, state_cls)}</td>"
+            f"<td>{_chip(level.title() if level != 'referral' else 'Referral', 'risk-' + level)}"
+            f"<div class='why'>{html.escape(why)}</div></td>"
+            f"<td class='pairs'>{pairs}<div class='why'>blocks: {blocks}</div></td>"
+            "</tr>")
+    return f"""
+      <h2 style="margin-top:22px">Rules that will block this plan ({len(blockers)})</h2>
+      <p class="sub">Each one already holds an FSN &times; CH your rules need, in a window that
+      overlaps or touches yours, so ControlGrid would reject the create/update. Tick the ones
+      that are safe to delete &mdash; they are deleted first, then the plan runs. Unticked
+      rules are left alone (those rows will fail and show up in the summary).</p>
+      <div class="tablewrap">
+        <table class="grid">
+          <thead><tr><th>Del</th><th>Rule &amp; summary</th><th>Type / state</th>
+            <th>Risk if deleted</th><th>FSN &times; CH</th></tr></thead>
+          <tbody>{''.join(rows)}</tbody>
+        </table>
+      </div>"""
+
+
 
 
 def _resolve_auth(form_token):
@@ -556,6 +724,13 @@ async def preview(file: UploadFile = File(...), cohort_ids: str = Form(""),
     email = (actor or "").strip() or cfg.email
     plan = build_plan(targets, existing, email, cohorts)
     csv_b64 = base64.b64encode(data).decode()
+    try:
+        blockers_html = _blockers_section(
+            predict_conflicts(plan, client.fetch_index(), int(time.time() * 1000)))
+    except Exception as ex:  # noqa: BLE001 - the check is advisory; the run still reports
+        blockers_html = (f'<div class="warn" style="margin-top:14px">Could not check for blocking '
+                         f'rules ({html.escape(str(ex))}). Failures will still be reported after '
+                         f'executing.</div>')
     body = f"""
     <div class="card">
       <h1>Preview</h1>
@@ -567,14 +742,16 @@ async def preview(file: UploadFile = File(...), cohort_ids: str = Form(""),
         <div class="stat"><b>{len(plan.creates)}</b>creates</div>
       </div>
       <pre>{html.escape(render_preview(plan))}</pre>
-      <form action="execute" method="post">
+      <form id="exec-form" action="execute" method="post">
         <input type="hidden" name="csv_b64" value="{csv_b64}">
         <input type="hidden" name="cohort_ids" value="{html.escape(cohort_ids)}">
         <input type="hidden" name="actor" value="{html.escape(actor)}">
         <input type="hidden" name="auth_token" value="{html.escape(auth_token)}">
-        <button class="btn go" type="submit">Confirm &amp; execute ({len(plan.edits)} edits, {len(plan.creates)} creates)</button>
+        {blockers_html}
+        <button class="btn go" type="submit" data-label="Confirm &amp; execute ({len(plan.edits)} edits, {len(plan.creates)} creates)">Confirm &amp; execute ({len(plan.edits)} edits, {len(plan.creates)} creates)</button>
       </form>
     </div>
+    {_BLOCKERS_JS}
     <a class="backlink" href="deals">&larr; Start over</a>
     """
     return _page(body, active="deals")
@@ -582,7 +759,7 @@ async def preview(file: UploadFile = File(...), cohort_ids: str = Form(""),
 
 @app.post("/execute", response_class=HTMLResponse)
 def execute(csv_b64: str = Form(...), cohort_ids: str = Form(""), actor: str = Form(""),
-            auth_token: str = Form("")):
+            auth_token: str = Form(""), delete_ids: List[str] = Form(default=[])):
     data = base64.b64decode(csv_b64)
     cohorts = parse_cohort_ids(cohort_ids)
     try:
@@ -598,6 +775,9 @@ def execute(csv_b64: str = Form(...), cohort_ids: str = Form(""), actor: str = F
     cfg, client = _get_client(auth_token)
     if cfg is None:
         return _page(_deals_form(client), active="deals")
+
+    # Rules ticked on the preview go first, so the plan is rebuilt without them.
+    deleted, delete_failed = _delete_rules(client, delete_ids, (actor or "").strip() or cfg.email)
 
     try:
         existing = client.fetch_all()
@@ -615,22 +795,21 @@ def execute(csv_b64: str = Form(...), cohort_ids: str = Form(""), actor: str = F
                                  f'(login may have expired): {html.escape(str(ex))}</div>'),
                      active="deals")
 
-    try:
-        conflicts = collect_conflicts(result["failed"], client.fetch_index())
-    except Exception:  # noqa: BLE001 - conflict lookup is best-effort
-        conflicts = []
+    explained, conflicts, index = _explain(result, client, plan)
     conflict_section = _conflict_section(conflicts, csv_b64, cohort_ids, _retry_set(result),
                                          auth_token, actor)
     failed_cls = " bad" if result["failed"] else ""
     body = f"""
     <div class="card">
       <h1>Done</h1>
+      {_delete_block(deleted, delete_failed)}
       <div class="stats">
         <div class="stat"><b>{len(result['edited'])}</b>edited</div>
         <div class="stat"><b>{len(result['created'])}</b>created</div>
         <div class="stat{failed_cls}"><b>{len(result['failed'])}</b>failed</div>
       </div>
-      {_failed_block(result)}
+      {_failed_block(explained)}
+      {_summary_block(plan, result, explained, index, deleted, delete_failed)}
     </div>
     {conflict_section}
     <a class="backlink" href="deals">&larr; Run another</a>
@@ -665,13 +844,7 @@ def resolve(csv_b64: str = Form(...), cohort_ids: str = Form(""), actor: str = F
         return _page(_deals_form(client), active="deals")
 
     email = (actor or "").strip() or cfg.email
-    deleted, delete_failed = [], []
-    for rid in delete_ids:
-        try:
-            client.delete_rule(rid, email)
-            deleted.append(rid)
-        except Exception as ex:  # noqa: BLE001 - report and continue
-            delete_failed.append((rid, str(ex)))
+    deleted, delete_failed = _delete_rules(client, delete_ids, email)
 
     try:
         existing = client.fetch_all()
@@ -689,21 +862,11 @@ def resolve(csv_b64: str = Form(...), cohort_ids: str = Form(""), actor: str = F
                                  f'(login may have expired): {html.escape(str(ex))}</div>'),
                      active="deals")
 
-    try:
-        conflicts = collect_conflicts(result["failed"], client.fetch_index())
-    except Exception:  # noqa: BLE001 - conflict lookup is best-effort
-        conflicts = []
+    explained, conflicts, index = _explain(result, client, plan)
     conflict_section = _conflict_section(conflicts, csv_b64, cohort_ids, _retry_set(result),
                                          auth_token, actor)
 
-    del_block = ""
-    if deleted:
-        ids = ", ".join(f"<code>{html.escape(d)}</code>" for d in deleted)
-        del_block += f'<div class="ok">Deleted {len(deleted)} conflicting rule(s): {ids}</div>'
-    if delete_failed:
-        items = "".join(f"<li><code>{html.escape(i)}</code>: {html.escape(e)}</li>"
-                        for i, e in delete_failed)
-        del_block += f'<div class="err"><b>Could not delete:</b><ul>{items}</ul></div>'
+    del_block = _delete_block(deleted, delete_failed)
 
     failed_cls = " bad" if result["failed"] else ""
     body = f"""
@@ -715,7 +878,8 @@ def resolve(csv_b64: str = Form(...), cohort_ids: str = Form(""), actor: str = F
         <div class="stat"><b>{len(result['created'])}</b>created</div>
         <div class="stat{failed_cls}"><b>{len(result['failed'])}</b>still failing</div>
       </div>
-      {_failed_block(result)}
+      {_failed_block(explained)}
+      {_summary_block(plan, result, explained, index, deleted, delete_failed)}
     </div>
     {conflict_section}
     <a class="backlink" href="deals">&larr; Run another</a>

@@ -102,6 +102,45 @@ def build_cohort_exclusion_edit_payload(existing, cohort_ids, email):
             "campaignId": None, "rule": rule}
 
 
+def build_update_payload(existing, target, email, excluded_cohort_ids=None):
+    """Edit payload that updates an existing rule IN PLACE to match the target:
+    new start/end time, warehouses + quantities, title/threshold/description and
+    active flag, while keeping the rule's id. Existing cohort hurdles are preserved
+    and any excluded cohort IDs are merged in. Intended for single-FSN rules (the
+    planner only routes single-mapping rules here, so other FSNs are never dropped)."""
+    mapping = {
+        "fsn": target.fsn,
+        "title": target.title,
+        "warehouseIds": [w.warehouse_id for w in target.warehouses],
+        "warehouseInventoryConfigs": [_wh_config_dict(w) for w in target.warehouses],
+        "cartValueThreshold": target.cart_value_threshold,
+        "description": target.cart_description,
+    }
+    hurdle_list = existing.get("hurdleList", []) or []
+    if excluded_cohort_ids:
+        hurdle_list = merge_cohort_exclusion(hurdle_list, excluded_cohort_ids, target.rule_description)
+    rule = {
+        "id": existing["id"],
+        "name": target.rule_name,
+        "campaignId": None,
+        "hurdleList": hurdle_list,
+        "successMessage": target.rule_description,
+        "failureMessage": target.rule_description,
+        "isActive": target.is_active,
+        "consequence": {
+            "type": "FREEBIE_DEALS",
+            "replenishmentType": target.replenishment_type,
+            "freebieDealsMapping": [mapping],
+        },
+        "description": target.rule_description,
+        "ruleType": "FREEBIE_DEALS",
+        "startTime": target.start_ms,
+        "endTime": target.end_ms,
+    }
+    return {"ruleId": existing["id"], "updatedBy": email, "user": email,
+            "campaignId": None, "rule": rule}
+
+
 def build_edit_payload(existing, removals_by_fsn, email, default_warehouse=DEFAULT_WAREHOUSE):
     consequence = copy.deepcopy(existing["consequence"])
     for mapping in consequence["freebieDealsMapping"]:
@@ -114,7 +153,12 @@ def build_edit_payload(existing, removals_by_fsn, email, default_warehouse=DEFAU
         ]
 
     total = sum(len(m["warehouseIds"]) for m in consequence["freebieDealsMapping"])
-    if total == 0:
+    # When the cleanup strips a rule down to nothing, it no longer serves any
+    # FSN x warehouse. Inject a placeholder warehouse only to keep the payload
+    # schema valid, but DEACTIVATE the rule so it does not stay active owning an
+    # unrelated warehouse (which would create fresh conflicts / "ghost" rules).
+    emptied = total == 0
+    if emptied:
         first = consequence["freebieDealsMapping"][0]
         first["warehouseIds"] = [default_warehouse]
         first["warehouseInventoryConfigs"] = [
@@ -128,7 +172,7 @@ def build_edit_payload(existing, removals_by_fsn, email, default_warehouse=DEFAU
         "hurdleList": existing.get("hurdleList", []),
         "successMessage": existing.get("successMessage"),
         "failureMessage": existing.get("failureMessage"),
-        "isActive": existing.get("ruleStatus") == "ACTIVE",
+        "isActive": (existing.get("ruleStatus") == "ACTIVE") and not emptied,
         "consequence": consequence,
         "description": existing.get("description"),
         "ruleType": "FREEBIE_DEALS",
