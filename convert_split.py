@@ -2,7 +2,8 @@
 
 This is the single converter tool. Source rows use a merged-header layout; the
 columns are located by the labels ``mov`` / ``warehouse`` /
-``rule_name_and_description`` / ``fcn``, and the date / status columns are read
+``rule_name_and_description`` / ``fsn`` (older sheets: ``fcn``) and, if present,
+``price`` (the deal price, filled into ``deal_price``), and the date / status columns are read
 positionally relative to those anchors. The ``warehouse`` cell carries a
 per-warehouse quantity on each line, e.g.::
 
@@ -30,7 +31,10 @@ Output (one filled row per warehouse)::
   split_percentage, split_number, cart_value_threshold, cart_description, deal_price
 
 Fixed defaults: title and cart_description are the same on every row;
-tag / split_percentage / deal_price are left empty.
+tag / split_percentage are left empty. Since the 5-Nov-2026 move to Pricing and
+Offers the offer sits on the parent FSN (sheet column ``fsn``), written to the
+``child_fcn`` output column so the deals CSV format is unchanged; ``deal_price``
+comes from the sheet's ``price`` column.
 
 CLI
 ---
@@ -72,29 +76,29 @@ _INACTIVE_STATUSES = {
 # When the warehouse cell says "all" / "all ch", apply every channel as
 # PARTIAL with this split_number. The channel list is the business CH list, kept
 # identical to Catalogue Ops (catalogue-platform tools/offer_dashboard/config.py)
-# - update both together. Updated 14-Oct-2026: added CXT, NWF and HIM.
+# - update both together. Updated 05-Nov-2026: full portal list,
+# BLR 29 + HYD 14 (added BTM01, KOR04, JMH01, MDL02, SNC01).
 BLR_CH = [
-    "FCHBLRAECS01", "FCHBLRBEN01", "FCHBLRBHO01", "FCHBLRCXT01", "FCHBLRDOD01",
-    "FCHBLRELC01", "FCHBLRHAR01", "FCHBLRHEB01", "FCHBLRHOO01", "FCHBLRHOR01",
-    "FCHBLRHSAF01", "FCHBLRHSR01", "FCHBLRIND01", "FCHBLRJAY01", "FCHBLRJPN01",
-    "FCHBLRKNP01", "FCHBLRKOR01", "FCHBLRMDP01", "FCHBLRNAG01", "FCHBLRNWF01",
-    "FCHBLRRAJ01", "FCHBLRSJR01", "FCHBLRTHA01", "FCHBLRVAR01", "FCHBLRWHF01",
-    "FCHBLRYEL01",
+    "FCHBLRAECS01", "FCHBLRBEN01", "FCHBLRBHO01", "FCHBLRBTM01", "FCHBLRCXT01",
+    "FCHBLRDOD01", "FCHBLRELC01", "FCHBLRHAR01", "FCHBLRHEB01", "FCHBLRHOO01",
+    "FCHBLRHOR01", "FCHBLRHSAF01", "FCHBLRHSR01", "FCHBLRIND01", "FCHBLRJAY01",
+    "FCHBLRJMH01", "FCHBLRJPN01", "FCHBLRKNP01", "FCHBLRKOR01", "FCHBLRKOR04",
+    "FCHBLRMDP01", "FCHBLRNAG01", "FCHBLRNWF01", "FCHBLRRAJ01", "FCHBLRSJR01",
+    "FCHBLRTHA01", "FCHBLRVAR01", "FCHBLRWHF01", "FCHBLRYEL01",
 ]
 HYD_CH = [
     "FCHHYDCYB03", "FCHHYDGCH01", "FCHHYDHAF01", "FCHHYDHIM01", "FCHHYDJHB01",
-    "FCHHYDKND01", "FCHHYDKOM01", "FCHHYDKTH01", "FCHHYDMOS01", "FCHHYDNAR01",
-    "FCHHYDNIZ01", "FCHHYDTEL01",
+    "FCHHYDKND01", "FCHHYDKOM01", "FCHHYDKTH01", "FCHHYDMDL02", "FCHHYDMOS01",
+    "FCHHYDNAR01", "FCHHYDNIZ01", "FCHHYDSNC01", "FCHHYDTEL01",
 ]
 ALL_CH = BLR_CH + HYD_CH
 
-# FCHBLRJMH01 is never part of "all" (user, 14-Oct-2026). JMH is the placeholder
-# a retiring rule is stripped down to, so that rule still holds the FSN at JMH
-# for the rest of its window; putting JMH in "all" made every replacement create
-# fail with "Timeline overlap ... in warehouse 'FCHBLRJMH01'". FCHHYDCYB03 is left
-# out too: the user's 14-Oct list of CHs to add named CXT, NWF and HIM only.
-# A row that names either id explicitly still gets it.
-EXCLUDED_FROM_ALL = {"FCHBLRJMH01", "FCHHYDCYB03"}
+# "all" = every listed CH except the two "GTM Sales" ids (user, 05-Nov-2026
+# full CH list). FCHBLRJMH01 is also the placeholder a retiring rule was
+# stripped down to on the old portal; FCHHYDMDL02 is its Hyderabad twin.
+# FCHHYDCYB03 is back in "all" now that it is on the business list.
+# A row that names an excluded id explicitly still gets it.
+EXCLUDED_FROM_ALL = {"FCHBLRJMH01", "FCHHYDMDL02"}
 
 ALL_CHANNELS = [c for c in ALL_CH if c not in EXCLUDED_FROM_ALL]
 ALL_SPLIT = 40  # split_number used for every channel when "all" is given
@@ -281,6 +285,20 @@ def _cart_threshold(mov):
     return (str(int(n)) if n == int(n) else str(n)), None
 
 
+def _deal_price(value):
+    """price cell -> (deal_price string, error_or_None). Blank stays blank."""
+    s = str(value).strip().replace(",", "").replace("₹", "").replace("Rs.", "").strip()
+    if not s:
+        return "", None
+    try:
+        n = float(s)
+    except ValueError:
+        return "", f"price {value!r} is not a number - deal_price left blank"
+    if n <= 0:
+        return "", f"price {value!r} is not above 0 - deal_price left blank"
+    return (str(int(n)) if n == int(n) else f"{n:.2f}"), None
+
+
 def convert_rows(rows, year=None, all_region="all", start_date="", end_date=""):
     """Convert source rows (list-of-lists) -> (target_rows, warnings).
 
@@ -298,10 +316,13 @@ def convert_rows(rows, year=None, all_region="all", start_date="", end_date=""):
         mov_idx = labels["mov"]
         wh_idx = labels["warehouse"]
         name_idx = labels["rule_name_and_description"]
-        fcn_idx = labels["fcn"]
+        fcn_idx = labels["fsn"] if "fsn" in labels else labels["fcn"]
     except KeyError as e:
+        if str(e) == "'fcn'":
+            raise ValueError("Missing expected header column: 'fsn'")
         raise ValueError(f"Missing expected header column: {e}")
     split_idx = labels.get("split")
+    price_idx = labels.get("price")
 
     status_idx = mov_idx - 1
 
@@ -341,6 +362,9 @@ def convert_rows(rows, year=None, all_region="all", start_date="", end_date=""):
         # Active by default; only FALSE when the status column explicitly says so.
         status = cell(row, status_idx).strip().lower()
         activation = "FALSE" if status in _INACTIVE_STATUSES else "TRUE"
+        deal_price, price_err = _deal_price(cell(row, price_idx) if price_idx is not None else "")
+        if price_err:
+            warnings.append(f"Line {line} ({name}): {price_err}")
         threshold, mov_err = _cart_threshold(cell(row, mov_idx))
         if mov_err:
             warnings.append(f"Line {line} ({name}): {mov_err}")
@@ -363,7 +387,7 @@ def convert_rows(rows, year=None, all_region="all", start_date="", end_date=""):
                 full, partial, split_number = _consumption(qty)
             out.append(prefix + [
                 wid, full, partial, "", split_number, threshold,
-                CART_DESCRIPTION_DEFAULT, "",
+                CART_DESCRIPTION_DEFAULT, deal_price,
             ])
 
     return out, warnings
