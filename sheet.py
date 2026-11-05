@@ -51,7 +51,7 @@ def find_header(rows):
 _RULE_FIELDS = [
     "rule_name", "rule_type", "activation", "rule_description", "start_time",
     "end-time", "replenishment_type", "child_fcn", "title",
-    "cart_value_threshold", "cart_description",
+    "cart_value_threshold", "cart_description", "deal_price",
 ]
 _REQUIRED_RULE_FIELDS = [
     "rule_name", "activation", "rule_description", "start_time",
@@ -181,6 +181,13 @@ def parse_and_validate(rows):
 
         replenishment = rule.get("replenishment_type") or "DAILY"
 
+        deal_price = None
+        if rule.get("deal_price"):
+            try:
+                deal_price = coerce_number(rule["deal_price"])
+            except ValueError:
+                errors.append(f"Line {line}: deal_price must be a number")
+
         targets.append(TargetRule(
             rule_name=rule.get("rule_name", ""),
             rule_description=rule.get("rule_description", ""),
@@ -193,6 +200,7 @@ def parse_and_validate(rows):
             cart_value_threshold=threshold,
             cart_description=rule.get("cart_description", ""),
             warehouses=warehouses,
+            deal_price=deal_price,
         ))
 
         # same FSN x warehouse must not appear under two different rules/thresholds

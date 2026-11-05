@@ -28,6 +28,7 @@ class TargetRule:
     cart_value_threshold: float
     cart_description: str
     warehouses: List[WarehouseConfig] = field(default_factory=list)
+    deal_price: Optional[float] = None  # fixed deal price on the new portal
 
     @property
     def key(self):

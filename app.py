@@ -38,6 +38,9 @@ try:  # works inside the freebie package and as a flat deploy repo (files at roo
     from freebie.referral_guard import REFERRAL_RULE_ID
     from freebie.summary import summary_csv, summary_rows
     from freebie.models import ValidationError
+    from freebie.pno import Pno
+    from freebie.pno_flow import build_pno_plan
+    from freebie.pno_planner import render_preview as pno_render_preview, execute as pno_execute
 except ImportError:  # pragma: no cover - deploy layout (files at repo root)
     from config import Config
     from auth import make_post_fn
@@ -50,6 +53,9 @@ except ImportError:  # pragma: no cover - deploy layout (files at repo root)
     from referral_guard import REFERRAL_RULE_ID
     from summary import summary_csv, summary_rows
     from models import ValidationError
+    from pno import Pno
+    from pno_flow import build_pno_plan
+    from pno_planner import render_preview as pno_render_preview, execute as pno_execute
 
 try:
     from freebie.timeutil import IST
@@ -256,22 +262,21 @@ def _deals_form(message=""):
     return f"""
     <div class="card">
       <h1>Create / edit deals</h1>
-      <p class="sub">Upload the FREEBIE_DEALS CSV (same columns as the template). Optionally list
-      cohort IDs to exclude from <b>every</b> rule (a NOT_IN hurdle on new rules).</p>
+      <p class="sub">Upload the converter's CSV. Rules are written to <b>Pricing and Offers</b>
+      (the new portal) as Cart value deals on the parent FSN at the sheet's <code>deal_price</code>.
+      Optionally list cohort IDs to exclude from <b>every</b> rule (a NOT_IN hurdle).</p>
       {message}
       <form action="preview" method="post" enctype="multipart/form-data">
         <label>Rules CSV</label>
         <input type="file" name="file" accept=".csv" required>
         <label>Excluded cohort IDs <span class="muted">(comma / space / newline separated — optional)</span></label>
         <textarea name="cohort_ids" placeholder="cohort_123, cohort_456"></textarea>
-        <label>Created / edited by <span class="muted">(your name or email — stamped on every rule you create, edit or delete; defaults to the server account if blank)</span></label>
-        <input type="text" name="actor" placeholder="e.g. sakshyat.pradhan@firstclub.co.in">
         <details class="adv">
           <summary>Advanced &mdash; run with your own ControlGrid login</summary>
           <p class="muted" style="margin-top:8px">The server's environment login is used by default.
           If it has expired, paste your own Cognito ID token &mdash; from the Network tab at
           portal.controlgrid.in, the <code>Authorization: Bearer …</code> header on any
-          rules-management request &mdash; to run it as yourself.</p>
+          pricing-and-offers request &mdash; to run it as yourself.</p>
           <label>Login token <span class="muted">(optional)</span></label>
           <textarea name="auth_token" placeholder="leave blank to use the server login"></textarea>
         </details>
@@ -693,65 +698,78 @@ def deals_form():
     return _page(_deals_form(), active="deals")
 
 
-@app.post("/preview", response_class=HTMLResponse)
-async def preview(file: UploadFile = File(...), cohort_ids: str = Form(""),
-                  actor: str = Form(""),
-                  auth_token: str = Form("")):
-    data = await file.read()
-    cohorts = parse_cohort_ids(cohort_ids)
+def _parse_upload(data):
+    """CSV bytes -> (targets, error_html)."""
     try:
-        rows = rows_from_csv_bytes(data)
-        targets = parse_and_validate(rows)
+        return parse_and_validate(rows_from_csv_bytes(data)), ""
     except ValidationError as e:
         items = "".join(f"<li>{html.escape(m)}</li>" for m in e.messages)
-        return _page(_deals_form(f'<div class="err"><b>Validation failed:</b><ul>{items}</ul></div>'),
-                     active="deals")
+        return None, f'<div class="err"><b>Validation failed:</b><ul>{items}</ul></div>'
     except Exception as ex:  # noqa: BLE001
-        return _page(_deals_form(f'<div class="err">Could not read CSV: {html.escape(str(ex))}</div>'),
-                     active="deals")
+        return None, f'<div class="err">Could not read CSV: {html.escape(str(ex))}</div>'
 
-    cfg, client = _get_client(auth_token)
-    if cfg is None:
-        return _page(_deals_form(client), active="deals")
 
+def _pno_plan(data, cohort_ids, auth_token):
+    """-> (actions, errors, n_existing, token, error_html). GET calls only."""
+    targets, err = _parse_upload(data)
+    if err:
+        return None, None, 0, "", err
+    _cfg, token = _resolve_auth(auth_token)
+    if not token:
+        return None, None, 0, "", ('<div class="err">No ControlGrid login available. Paste your '
+                                   'login token under <b>Advanced</b>.</div>')
     try:
-        existing = client.fetch_all()
+        actions, errors, n_existing = build_pno_plan(
+            Pno(token), targets, parse_cohort_ids(cohort_ids), int(time.time() * 1000))
     except Exception as ex:  # noqa: BLE001
-        return _page(_deals_form(f'<div class="err">Failed to fetch existing rules '
-                                 f'(login token may have expired): {html.escape(str(ex))}</div>'),
-                     active="deals")
+        return None, None, 0, "", (f'<div class="err">Failed to read offers from Pricing and Offers '
+                                   f'(login token may have expired): {html.escape(str(ex))}</div>')
+    return actions, errors, n_existing, token, ""
 
-    email = (actor or "").strip() or cfg.email
-    plan = build_plan(targets, existing, email, cohorts)
+
+def _row_errors(errors):
+    if not errors:
+        return ""
+    items = "".join(f"<li>{html.escape(m)}</li>" for m in errors)
+    return f'<div class="warn"><b>Left out of the plan:</b><ul>{items}</ul></div>'
+
+
+@app.post("/preview", response_class=HTMLResponse)
+async def preview(file: UploadFile = File(...), cohort_ids: str = Form(""),
+                  actor: str = Form(""), auth_token: str = Form("")):
+    data = await file.read()
+    actions, errors, n_existing, _token, err = _pno_plan(data, cohort_ids, auth_token)
+    if err:
+        return _page(_deals_form(err), active="deals")
+    todo = [a for a in actions if a.kind != "skip"]
+    n_create = sum(a.kind == "create" for a in actions)
+    n_update = sum(a.kind == "update" for a in actions)
+    n_skip = sum(len(a.skipped) for a in actions)
     csv_b64 = base64.b64encode(data).decode()
-    try:
-        blockers_html = _blockers_section(
-            predict_conflicts(plan, client.fetch_index(), int(time.time() * 1000)))
-    except Exception as ex:  # noqa: BLE001 - the check is advisory; the run still reports
-        blockers_html = (f'<div class="warn" style="margin-top:14px">Could not check for blocking '
-                         f'rules ({html.escape(str(ex))}). Failures will still be reported after '
-                         f'executing.</div>')
+    button = (f'<button class="btn go" type="submit">Confirm &amp; execute ({n_update} updates, '
+              f'{n_create} creates)</button>') if todo else '<p class="muted">Nothing to write.</p>'
     body = f"""
     <div class="card">
       <h1>Preview</h1>
-      <p class="sub">Nothing has been written yet &mdash; review the plan, then confirm.</p>
+      <p class="sub">Pricing and Offers (new portal). Nothing has been written yet &mdash;
+      review the plan, then confirm. CHs already held by another open offer on the same
+      product are skipped (one offer per product per CH).</p>
+      {_row_errors(errors)}
       <div class="stats">
-        <div class="stat"><b>{len(targets)}</b>parsed</div>
-        <div class="stat"><b>{len(existing)}</b>existing</div>
-        <div class="stat"><b>{len(plan.edits)}</b>edits</div>
-        <div class="stat"><b>{len(plan.creates)}</b>creates</div>
+        <div class="stat"><b>{len(actions)}</b>rules</div>
+        <div class="stat"><b>{n_existing}</b>open on these FSNs</div>
+        <div class="stat"><b>{n_update}</b>updates</div>
+        <div class="stat"><b>{n_create}</b>creates</div>
+        <div class="stat{' bad' if n_skip else ''}"><b>{n_skip}</b>CHs skipped</div>
       </div>
-      <pre>{html.escape(render_preview(plan))}</pre>
-      <form id="exec-form" action="execute" method="post">
+      <pre>{html.escape(pno_render_preview(actions)) if actions else "(no rules)"}</pre>
+      <form action="execute" method="post">
         <input type="hidden" name="csv_b64" value="{csv_b64}">
         <input type="hidden" name="cohort_ids" value="{html.escape(cohort_ids)}">
-        <input type="hidden" name="actor" value="{html.escape(actor)}">
         <input type="hidden" name="auth_token" value="{html.escape(auth_token)}">
-        {blockers_html}
-        <button class="btn go" type="submit" data-label="Confirm &amp; execute ({len(plan.edits)} edits, {len(plan.creates)} creates)">Confirm &amp; execute ({len(plan.edits)} edits, {len(plan.creates)} creates)</button>
+        {button}
       </form>
     </div>
-    {_BLOCKERS_JS}
     <a class="backlink" href="deals">&larr; Start over</a>
     """
     return _page(body, active="deals")
@@ -759,129 +777,37 @@ async def preview(file: UploadFile = File(...), cohort_ids: str = Form(""),
 
 @app.post("/execute", response_class=HTMLResponse)
 def execute(csv_b64: str = Form(...), cohort_ids: str = Form(""), actor: str = Form(""),
-            auth_token: str = Form(""), delete_ids: List[str] = Form(default=[])):
+            auth_token: str = Form("")):
     data = base64.b64decode(csv_b64)
-    cohorts = parse_cohort_ids(cohort_ids)
-    try:
-        targets = parse_and_validate(rows_from_csv_bytes(data))
-    except ValidationError as e:
-        items = "".join(f"<li>{html.escape(m)}</li>" for m in e.messages)
-        return _page(_deals_form(f'<div class="err"><b>Validation failed:</b><ul>{items}</ul></div>'),
-                     active="deals")
-    except Exception as ex:  # noqa: BLE001
-        return _page(_deals_form(f'<div class="err">Could not read CSV: {html.escape(str(ex))}</div>'),
-                     active="deals")
-
-    cfg, client = _get_client(auth_token)
-    if cfg is None:
-        return _page(_deals_form(client), active="deals")
-
-    # Rules ticked on the preview go first, so the plan is rebuilt without them.
-    deleted, delete_failed = _delete_rules(client, delete_ids, (actor or "").strip() or cfg.email)
-
-    try:
-        existing = client.fetch_all()
-    except Exception as ex:  # noqa: BLE001
-        return _page(_deals_form(f'<div class="err">Failed to fetch existing rules '
-                                 f'(login token may have expired): {html.escape(str(ex))}</div>'),
-                     active="deals")
-
-    email = (actor or "").strip() or cfg.email
-    plan = build_plan(targets, existing, email, cohorts)
-    try:
-        result = execute_plan(plan, client)
-    except Exception as ex:  # noqa: BLE001
-        return _page(_deals_form(f'<div class="err">Execution failed '
-                                 f'(login may have expired): {html.escape(str(ex))}</div>'),
-                     active="deals")
-
-    explained, conflicts, index = _explain(result, client, plan)
-    conflict_section = _conflict_section(conflicts, csv_b64, cohort_ids, _retry_set(result),
-                                         auth_token, actor)
-    failed_cls = " bad" if result["failed"] else ""
+    # Re-plan against the live state so versions and skipped CHs are current.
+    actions, errors, _n, token, err = _pno_plan(data, cohort_ids, auth_token)
+    if err:
+        return _page(_deals_form(err), active="deals")
+    todo = [a for a in actions if a.kind != "skip"]
+    result = pno_execute(todo, Pno(token, allow_writes=True)) if todo else {"done": [], "failed": []}
+    rows = "".join(
+        f"<tr><td>ok</td><td>{html.escape(k)}</td><td>{html.escape(l)}</td>"
+        f"<td><code>{html.escape(str(i or ''))}</code></td></tr>" for k, l, i in result["done"])
+    rows += "".join(
+        f"<tr><td><b style='color:#b42318'>failed</b></td><td>{html.escape(k)}</td>"
+        f"<td>{html.escape(l)}</td><td>{html.escape(str(e))}</td></tr>" for k, l, e in result["failed"])
+    skipped = "".join(
+        f"<li>{html.escape(a.label)}: {html.escape(wh)} held by {html.escape(why)}</li>"
+        for a in actions for wh, why in sorted(a.skipped.items()))
     body = f"""
     <div class="card">
       <h1>Done</h1>
-      {_delete_block(deleted, delete_failed)}
+      {_row_errors(errors)}
       <div class="stats">
-        <div class="stat"><b>{len(result['edited'])}</b>edited</div>
-        <div class="stat"><b>{len(result['created'])}</b>created</div>
-        <div class="stat{failed_cls}"><b>{len(result['failed'])}</b>failed</div>
+        <div class="stat"><b>{sum(k == 'update' for k, _l, _i in result['done'])}</b>updated</div>
+        <div class="stat"><b>{sum(k == 'create' for k, _l, _i in result['done'])}</b>created</div>
+        <div class="stat{' bad' if result['failed'] else ''}"><b>{len(result['failed'])}</b>failed</div>
       </div>
-      {_failed_block(explained)}
-      {_summary_block(plan, result, explained, index, deleted, delete_failed)}
+      <div class="tablewrap"><table class="grid"><thead><tr><th></th><th>Action</th><th>Rule</th>
+      <th>Rule id / error</th></tr></thead><tbody>{rows or '<tr><td></td><td colspan=3>Nothing written.</td></tr>'}</tbody></table></div>
+      {f'<div class="warn" style="margin-top:14px"><b>Skipped CHs:</b><ul>{skipped}</ul></div>' if skipped else ''}
+      <p class="muted">Changes take about 5 minutes to show on the app.</p>
     </div>
-    {conflict_section}
-    <a class="backlink" href="deals">&larr; Run another</a>
-    """
-    return _page(body, active="deals")
-
-
-@app.post("/resolve", response_class=HTMLResponse)
-def resolve(csv_b64: str = Form(...), cohort_ids: str = Form(""), actor: str = Form(""),
-            retry_b64: str = Form(...), delete_ids: List[str] = Form(default=[]),
-            auth_token: str = Form("")):
-    """Delete the user-selected conflicting rules, then re-run only the items that
-    previously failed. Loops back to the resolve UI if conflicts remain."""
-    data = base64.b64decode(csv_b64)
-    cohorts = parse_cohort_ids(cohort_ids)
-    try:
-        retry = json.loads(base64.b64decode(retry_b64).decode())
-    except Exception:  # noqa: BLE001
-        retry = {"edits": [], "creates": []}
-    try:
-        targets = parse_and_validate(rows_from_csv_bytes(data))
-    except ValidationError as e:
-        items = "".join(f"<li>{html.escape(m)}</li>" for m in e.messages)
-        return _page(_deals_form(f'<div class="err"><b>Validation failed:</b><ul>{items}</ul></div>'),
-                     active="deals")
-    except Exception as ex:  # noqa: BLE001
-        return _page(_deals_form(f'<div class="err">Could not read CSV: {html.escape(str(ex))}</div>'),
-                     active="deals")
-
-    cfg, client = _get_client(auth_token)
-    if cfg is None:
-        return _page(_deals_form(client), active="deals")
-
-    email = (actor or "").strip() or cfg.email
-    deleted, delete_failed = _delete_rules(client, delete_ids, email)
-
-    try:
-        existing = client.fetch_all()
-    except Exception as ex:  # noqa: BLE001
-        return _page(_deals_form(f'<div class="err">Failed to fetch existing rules '
-                                 f'(login token may have expired): {html.escape(str(ex))}</div>'),
-                     active="deals")
-
-    plan = build_plan(targets, existing, email, cohorts)
-    plan = filter_plan(plan, set(retry.get("edits", [])), set(retry.get("creates", [])))
-    try:
-        result = execute_plan(plan, client)
-    except Exception as ex:  # noqa: BLE001
-        return _page(_deals_form(f'<div class="err">Re-run failed '
-                                 f'(login may have expired): {html.escape(str(ex))}</div>'),
-                     active="deals")
-
-    explained, conflicts, index = _explain(result, client, plan)
-    conflict_section = _conflict_section(conflicts, csv_b64, cohort_ids, _retry_set(result),
-                                         auth_token, actor)
-
-    del_block = _delete_block(deleted, delete_failed)
-
-    failed_cls = " bad" if result["failed"] else ""
-    body = f"""
-    <div class="card">
-      <h1>Re-run complete</h1>
-      {del_block}
-      <div class="stats">
-        <div class="stat"><b>{len(result['edited'])}</b>edited</div>
-        <div class="stat"><b>{len(result['created'])}</b>created</div>
-        <div class="stat{failed_cls}"><b>{len(result['failed'])}</b>still failing</div>
-      </div>
-      {_failed_block(explained)}
-      {_summary_block(plan, result, explained, index, deleted, delete_failed)}
-    </div>
-    {conflict_section}
     <a class="backlink" href="deals">&larr; Run another</a>
     """
     return _page(body, active="deals")
@@ -891,6 +817,7 @@ def resolve(csv_b64: str = Form(...), cohort_ids: str = Form(""), actor: str = F
 @app.get("/preview")
 @app.get("/execute")
 @app.get("/resolve")
+@app.post("/resolve")
 def deals_get():
     return RedirectResponse(url="deals")
 
