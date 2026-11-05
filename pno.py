@@ -44,7 +44,8 @@ def _csv(v):
 
 class PnoError(RuntimeError):
     def __init__(self, status, message, details=None):
-        super().__init__(f"pno {status}: {message}".strip())
+        extra = f" ({'; '.join(map(str, details))})" if isinstance(details, list) and details else ""
+        super().__init__(f"pno {status}: {message}{extra}".strip())
         self.status = status
         self.details = details
 

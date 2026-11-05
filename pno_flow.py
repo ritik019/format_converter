@@ -31,6 +31,8 @@ except ImportError:  # pragma: no cover - deploy layout (files at repo root)
 
 START_LEAD_MS = 2 * 60 * 1000
 
+FSN_BATCH = 20  # the search API allows at most 20 fsn values per call
+
 
 def to_pno_targets(targets, cohorts, now_ms):
     """TargetRule list -> (PnoTarget list, error strings). Nothing is sent."""
@@ -67,8 +69,8 @@ def open_rules_for(client, fsns):
     """Full views of every open pno rule on these FSNs (GET only)."""
     found = {}
     fsns = sorted({f.strip() for f in fsns if f and f.strip()})
-    for i in range(0, len(fsns), 50):
-        for r in client.search(fsn=fsns[i:i + 50], status=list(OPEN_STATUSES)):
+    for i in range(0, len(fsns), FSN_BATCH):
+        for r in client.search(fsn=fsns[i:i + FSN_BATCH], status=list(OPEN_STATUSES)):
             found[r["id"]] = r
     views = []
     for rid, r in found.items():
