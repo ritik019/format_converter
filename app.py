@@ -41,6 +41,7 @@ try:  # works inside the freebie package and as a flat deploy repo (files at roo
     from freebie.pno import Pno
     from freebie.pno_flow import build_pno_plan
     from freebie.pno_planner import render_preview as pno_render_preview, execute as pno_execute
+    from freebie import banners
 except ImportError:  # pragma: no cover - deploy layout (files at repo root)
     from config import Config
     from auth import make_post_fn
@@ -56,6 +57,7 @@ except ImportError:  # pragma: no cover - deploy layout (files at repo root)
     from pno import Pno
     from pno_flow import build_pno_plan
     from pno_planner import render_preview as pno_render_preview, execute as pno_execute
+    import banners
 
 try:
     from freebie.timeutil import IST
@@ -156,7 +158,7 @@ def _nav(active):
     def link(href, label, key):
         cls = ' class="active"' if active == key else ""
         return f'<a href="{href}"{cls}>{label}</a>'
-    return link(".", "Converter", "convert") + link("deals", "Deals", "deals")
+    return link(".", "Converter", "convert") + link("deals", "Deals", "deals") + link("banners", "Banners", "banners")
 
 
 def _page(body, active=""):
@@ -820,6 +822,191 @@ def execute(csv_b64: str = Form(...), cohort_ids: str = Form(""), actor: str = F
 @app.post("/resolve")
 def deals_get():
     return RedirectResponse(url="deals")
+
+
+# --------------------------------------------------------------------------- #
+# Banners (rules-management "Warehouse Widget" banner rows, one per rule x CH)
+# --------------------------------------------------------------------------- #
+
+def _banners_form(message="", lines="", chs="", auth_token=""):
+    return f"""
+    <div class="card">
+      <h1>Add / update banners</h1>
+      <p class="sub">Download the template, fill one row per rule and upload it (CSV or Excel).
+      Columns: <code>rule_id</code>, <code>rank</code>, <code>banner_id</code>, <code>banner_url</code>,
+      <code>chs</code>. The banner goes on every CH of the rule on Pricing and Offers, plus any CH
+      that already has a banner for it. Leave <b>rank</b> blank to keep each CH's current rank.
+      <b>chs</b> is optional: CHs separated by commas (e.g. <code>FCHHYDTEL01, FCHHYDNAR01</code>), only for that row. CTA stays as it is
+      (new rows get <code>CATEGORY_TREE</code> / <code>NA</code>).</p>
+      {message}
+      <a class="btn" href="banner-template.csv" style="text-decoration:none">&darr; Download template</a>
+      <form action="banner-preview" method="post" enctype="multipart/form-data">
+        <label>Upload filled sheet <span class="muted">(.csv or .xlsx)</span></label>
+        <input type="file" name="file" accept=".csv,.xlsx">
+        <details class="adv"{' open' if lines else ''}>
+          <summary>&hellip; or paste rows instead</summary>
+          <p class="muted" style="margin-top:8px">One row per line, comma or tab separated
+          (copy straight from a sheet).</p>
+          <textarea name="lines" style="min-height:120px;font-family:ui-monospace,Menlo,monospace;font-size:12.5px"
+            placeholder="pno_01M6PPVT0PBGQDZH6BZ9WS2NB8, 200, 461945, https://d1cuexdfcmg0zk.cloudfront.net/assets/image/.../original.webp">{html.escape(lines)}</textarea>
+        </details>
+        <details class="adv">
+          <summary>Only some CHs (for every row)</summary>
+          <label>Only these CHs <span class="muted">(comma separated, e.g. FCHBLRHSR01, FCHHYDTEL01 &mdash; blank = all of the rule's CHs)</span></label>
+          <input type="text" name="chs" value="{html.escape(chs)}">
+        </details>
+        <details class="adv">
+          <summary>Advanced &mdash; run with your own ControlGrid login</summary>
+          <p class="muted" style="margin-top:8px">The server's login is used by default. If it has
+          expired, paste your Cognito ID token (the <code>Authorization: Bearer …</code> header on
+          any portal.controlgrid.in request).</p>
+          <label>Login token <span class="muted">(optional)</span></label>
+          <textarea name="auth_token" placeholder="leave blank to use the server login">{html.escape(auth_token)}</textarea>
+        </details>
+        <button class="btn go" type="submit">Preview</button>
+      </form>
+    </div>
+    """
+
+
+def _banner_plan(lines, chs, auth_token):
+    """-> (plans, line_errors, client, error_html). GET calls only."""
+    items, line_errors = banners.parse_lines(lines)
+    if not items:
+        return None, line_errors, None, '<div class="err">No valid banner lines.</div>' + _row_errors(line_errors)
+    _cfg, token = _resolve_auth(auth_token)
+    if not token:
+        return None, line_errors, None, ('<div class="err">No ControlGrid login available. Paste your '
+                                         'login token under <b>Advanced</b>.</div>')
+    client = banners.BannerClient(token)
+    try:
+        plans = banners.build_plan(client, items, banners.parse_ch_filter(chs))
+    except Exception as ex:  # noqa: BLE001
+        return None, line_errors, None, f'<div class="err">Could not read banners: {html.escape(str(ex))}</div>'
+    return plans, line_errors, client, ""
+
+
+def _banner_row_html(r):
+    old, row = r["old"] or {}, r["row"]
+    action = "update" if r["old"] else "new"
+    old_banner = html.escape(str(old.get("bannerId") or "-"))
+    old_rank = html.escape(str(old.get("rank") if r["old"] else "-"))
+    check = ""
+    if r["clash"]:
+        taken = ", ".join(str(c.get("bannerId") or "") for c in r["clash"])
+        check = '<b style="color:#b42318">rank taken by ' + html.escape(taken) + "</b>"
+    return (f"<tr><td>{action}</td><td><code>{html.escape(row['warehouseId'])}</code></td>"
+            f"<td>{old_banner} &rarr; <b>{html.escape(row['bannerId'])}</b></td>"
+            f"<td>{old_rank} &rarr; <b>{row['rank']}</b></td><td>{check}</td></tr>")
+
+
+def _banner_preview_table(plans):
+    out = []
+    for p in plans:
+        title = html.escape(p["name"] or "(name unknown)")
+        status = f' {_chip(p["status"], "active" if p["status"] == "LIVE" else "")}' if p["status"] else ""
+        n_new = sum(r["old"] is None for r in p["rows"])
+        rows = "".join(_banner_row_html(r) for r in p["rows"])
+        probs = _row_errors(p["problems"])
+        out.append(f"""
+        <h2 style="margin-top:18px">{title}{status}</h2>
+        <p class="muted"><code>{html.escape(p['rule_id'])}</code> &middot; {len(p['rows'])} CHs
+        ({n_new} new, {len(p['rows']) - n_new} updated)</p>
+        {probs}
+        {f'<div class="tablewrap"><table class="grid"><thead><tr><th></th><th>CH</th><th>Banner</th><th>Rank</th><th>Check</th></tr></thead><tbody>{rows}</tbody></table></div>' if rows else ''}
+        """)
+    return "".join(out)
+
+
+@app.get("/banners", response_class=HTMLResponse)
+def banners_form():
+    return _page(_banners_form(), active="banners")
+
+
+@app.get("/banner-template.csv")
+def banner_template():
+    return Response(content=banners.TEMPLATE_CSV, media_type="text/csv",
+                    headers={"Content-Disposition": 'attachment; filename="banner_template.csv"'})
+
+
+@app.post("/banner-preview", response_class=HTMLResponse)
+async def banners_preview(file: UploadFile = File(None), lines: str = Form(""), chs: str = Form(""),
+                          auth_token: str = Form("")):
+    if file is not None and file.filename:
+        try:
+            lines = banners.rows_to_lines(banners.rows_from_upload(file.filename, await file.read()))
+        except Exception as ex:  # noqa: BLE001
+            return _page(_banners_form(f'<div class="err">Could not read the file: {html.escape(str(ex))}</div>',
+                                       lines, chs, auth_token), active="banners")
+    plans, line_errors, _client, err = _banner_plan(lines, chs, auth_token)
+    if err:
+        return _page(_banners_form(err, lines, chs, auth_token), active="banners")
+    n_rows = sum(len(p["rows"]) for p in plans)
+    n_clash = sum(bool(r["clash"]) for p in plans for r in p["rows"])
+    clash_note = (f'<div class="warn"><b>{n_clash} CHs already have another active banner at that rank.</b> '
+                  'Writing may switch the other banner off. Change the rank if that is not intended.</div>'
+                  if n_clash else "")
+    button = (f'<button class="btn go" type="submit">Confirm &amp; write {n_rows} banner rows</button>'
+              if n_rows else '<p class="muted">Nothing to write.</p>')
+    body = f"""
+    <div class="card">
+      <h1>Preview</h1>
+      <p class="sub">Nothing has been written yet.</p>
+      {_row_errors(line_errors)}
+      {clash_note}
+      <div class="stats">
+        <div class="stat"><b>{len(plans)}</b>rules</div>
+        <div class="stat"><b>{n_rows}</b>banner rows</div>
+        <div class="stat{' bad' if n_clash else ''}"><b>{n_clash}</b>rank clashes</div>
+      </div>
+      {_banner_preview_table(plans)}
+      <form action="banner-execute" method="post">
+        <input type="hidden" name="lines" value="{html.escape(lines)}">
+        <input type="hidden" name="chs" value="{html.escape(chs)}">
+        <input type="hidden" name="auth_token" value="{html.escape(auth_token)}">
+        {button}
+      </form>
+    </div>
+    <a class="backlink" href="banners">&larr; Start over</a>
+    """
+    return _page(body, active="banners")
+
+
+@app.post("/banner-execute", response_class=HTMLResponse)
+def banners_execute(lines: str = Form(""), chs: str = Form(""), auth_token: str = Form("")):
+    # Re-plan against the live state, then write and re-read.
+    plans, line_errors, client, err = _banner_plan(lines, chs, auth_token)
+    if err:
+        return _page(_banners_form(err, lines, chs, auth_token), active="banners")
+    res = banners.execute(client, plans)
+    fails = "".join(f"<li><code>{html.escape(r['ruleId'])}</code> {html.escape(r['warehouseId'])}: "
+                    f"{html.escape(e)}</li>" for r, e in res["failed"])
+    mism = "".join(f"<li><code>{html.escape(rid)}</code> {html.escape(wh)}: {html.escape(why)}</li>"
+                   for rid, wh, why in res["mismatched"])
+    good = not res["failed"] and not res["mismatched"]
+    body = f"""
+    <div class="card">
+      <h1>Done</h1>
+      <div class="{'ok' if good else 'warn'}">{len(res['ok'])} banner rows written
+      {'and verified on re-read.' if good else '- see problems below.'}</div>
+      <div class="stats">
+        <div class="stat"><b>{len(res['ok'])}</b>written</div>
+        <div class="stat{' bad' if res['failed'] else ''}"><b>{len(res['failed'])}</b>failed</div>
+        <div class="stat{' bad' if res['mismatched'] else ''}"><b>{len(res['mismatched'])}</b>not matching on re-read</div>
+      </div>
+      {f'<div class="err"><b>Failed:</b><ul>{fails}</ul></div>' if fails else ''}
+      {f'<div class="warn"><b>Re-read differs:</b><ul>{mism}</ul></div>' if mism else ''}
+      {''.join(_row_errors(p['problems']) for p in plans)}
+    </div>
+    <a class="backlink" href="banners">&larr; Add more banners</a>
+    """
+    return _page(body, active="banners")
+
+
+@app.get("/banner-preview")
+@app.get("/banner-execute")
+def banners_get():
+    return RedirectResponse(url="banners")
 
 
 @app.get("/healthcheck")
