@@ -834,9 +834,10 @@ def _banners_form(message="", lines="", chs="", auth_token=""):
       <h1>Add / update banners</h1>
       <p class="sub">Download the template, fill one row per rule and upload it (CSV or Excel).
       Columns: <code>rule_id</code>, <code>rank</code>, <code>banner_id</code>, <code>banner_url</code>,
-      <code>chs</code>. The banner goes on every CH of the rule on Pricing and Offers, plus any CH
-      that already has a banner for it. Leave <b>rank</b> blank to keep each CH's current rank.
-      <b>chs</b> is optional: CHs separated by commas (e.g. <code>FCHHYDTEL01, FCHHYDNAR01</code>), only for that row. CTA stays as it is
+      <code>chs</code>. With <b>chs</b> filled, the banner goes on exactly those CHs (comma separated,
+      e.g. <code>FCHHYDTEL01, FCHHYDNAR01</code>), even if the rule isn't on them. With <b>chs</b> blank,
+      it goes on every CH of the rule on Pricing and Offers, plus any CH that already has a banner for it.
+      Leave <b>rank</b> blank to keep each CH's current rank. CTA stays as it is
       (new rows get <code>CATEGORY_TREE</code> / <code>NA</code>).</p>
       {message}
       <a class="btn" href="banner-template.csv" style="text-decoration:none">&darr; Download template</a>
@@ -852,7 +853,7 @@ def _banners_form(message="", lines="", chs="", auth_token=""):
         </details>
         <details class="adv">
           <summary>Only some CHs (for every row)</summary>
-          <label>Only these CHs <span class="muted">(comma separated, e.g. FCHBLRHSR01, FCHHYDTEL01 &mdash; blank = all of the rule's CHs)</span></label>
+          <label>Only these CHs <span class="muted">(comma separated, e.g. FCHBLRHSR01, FCHHYDTEL01 &mdash; used for rows with a blank chs column, even if the rule isn't on them; blank = all of the rule's CHs)</span></label>
           <input type="text" name="chs" value="{html.escape(chs)}">
         </details>
         <details class="adv">
@@ -891,10 +892,13 @@ def _banner_row_html(r):
     action = "update" if r["old"] else "new"
     old_banner = html.escape(str(old.get("bannerId") or "-"))
     old_rank = html.escape(str(old.get("rank") if r["old"] else "-"))
-    check = ""
+    checks = []
     if r["clash"]:
         taken = ", ".join(str(c.get("bannerId") or "") for c in r["clash"])
-        check = '<b style="color:#b42318">rank taken by ' + html.escape(taken) + "</b>"
+        checks.append('<b style="color:#b42318">rank taken by ' + html.escape(taken) + "</b>")
+    if r.get("off_rule"):
+        checks.append('<span class="muted">CH not on the rule</span>')
+    check = "<br>".join(checks)
     return (f"<tr><td>{action}</td><td><code>{html.escape(row['warehouseId'])}</code></td>"
             f"<td>{old_banner} &rarr; <b>{html.escape(row['bannerId'])}</b></td>"
             f"<td>{old_rank} &rarr; <b>{row['rank']}</b></td><td>{check}</td></tr>")

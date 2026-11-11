@@ -13,8 +13,9 @@ banner when one is switched on at a taken rank, so the plan flags those clashes.
 
 Input: a CSV / .xlsx (columns rule_id, rank, banner_id, banner_url, chs) or pasted lines
 (comma or tab separated). ``chs`` is optional: comma separated CHs for that row only.
-Blank rank = keep each row's current rank. Target CHs = the rule's warehouses on
-Pricing and Offers plus any CH that already has a banner row for the rule.
+Blank rank = keep each row's current rank. Target CHs = the CHs named in ``chs`` (row) or
+the form filter, written as given even when the rule isn't mapped there; with neither, the
+rule's FCH* warehouses on Pricing and Offers plus any CH that already has a banner row.
 """
 import csv
 import io
@@ -178,12 +179,15 @@ def build_plan(client, items, ch_filter=None):
                             if w.get("mappingStatus", "ACTIVE") == "ACTIVE"]
             except Exception as ex:  # noqa: BLE001
                 plan["problems"].append(f"could not read the rule on Pricing and Offers: {ex}")
-        whs = sorted(set(rule_whs) | set(existing))
+        on_rule = {w for w in rule_whs if w.startswith("FCH")} | set(existing)
         only = it.get("chs") or ch_filter
-        if only:
-            whs = [w for w in whs if w in only]
+        # CHs named in the sheet/form are written as given, even if the rule isn't on them
+        whs = sorted(only) if only else sorted(on_rule)
         if not whs:
-            plan["problems"].append("no CHs to write (rule has no warehouses / no CH matched the filter)")
+            others = ", ".join(sorted(set(rule_whs) - on_rule))
+            plan["problems"].append(
+                "no CHs to write: the rule is on no CH" + (f" (only {others})" if others else "")
+                + " and has no banners yet - list the CHs in the chs column")
             continue
         for wh in whs:
             old = existing.get(wh)
@@ -203,7 +207,7 @@ def build_plan(client, items, ch_filter=None):
                     wh_cache[wh] = []
             clash = [r for r in wh_cache[wh] if r.get("ruleId") != rid and r.get("rank") == rank
                      and r.get("isActive") and r.get("bannerId")]
-            plan["rows"].append({"row": row, "old": old, "clash": clash})
+            plan["rows"].append({"row": row, "old": old, "clash": clash, "off_rule": wh not in on_rule})
     return plans
 
 
